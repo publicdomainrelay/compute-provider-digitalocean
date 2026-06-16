@@ -5,6 +5,9 @@
     "./lib/abc/compute-provider",
     "./lib/compute-provider-local",
     "./lib/compute-provider-digitalocean",
+    "./lib/rbac-atproto",
+    "./lib/rbac-git",
+    "./lib/oidc-issuer",
     "./lib/hono-factory-compute-provider-local",
     "./lib/hono-factory-compute-provider-digitalocean",
     "./hono-compute-provider"

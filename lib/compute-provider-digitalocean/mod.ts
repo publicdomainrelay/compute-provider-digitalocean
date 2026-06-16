@@ -9,12 +9,14 @@ import type {
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider";
+import { configureRbac } from "@publicdomainrelay/rbac-git";
 
 export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
   getAgentDid: () => string;
   acceptPathVm: string;
   digitaloceanBaseUrl: string;
   doToken: string;
+  rbacRepoRoot?: string;
   createRecord?: (
     collection: string,
     record: Record<string, unknown>,
@@ -119,7 +121,15 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     const doctx = await makeDoctx();
 
     let rbacRef: StrongRef | undefined;
-    if (createRecord) {
+    if (ctx.rbacRepoRoot) {
+      rbacRef = await configureRbac(vm, requesterDid, {
+        teamUuid: doctx.teamUuid,
+        rbacRepoRoot: ctx.rbacRepoRoot,
+        digitaloceanBaseUrl,
+        doToken,
+        log: (level, msg, meta) => log(level, msg, meta),
+      });
+    } else if (createRecord) {
       const agentDidPlc = getAgentDid().split(":").slice(-1)[0];
       const slug = `${doctx.teamUuid}-${requesterPlc}-${vm.role}`;
       rbacRef = await createRecord(RBAC_NSID, {

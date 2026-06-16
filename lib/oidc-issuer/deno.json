@@ -1,0 +1,11 @@
+{
+  "name": "@publicdomainrelay/oidc-issuer",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "hono": "npm:hono@^4",
+    "jose": "npm:jose@^5",
+    "yaml": "npm:yaml@^2.7.0"
+  }
+}

@@ -1,5 +1,5 @@
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import type { Logger } from "@publicdomainrelay/common";
+import type { Logger, LoggerInterface } from "@publicdomainrelay/common";
 import type {
   ComputeProvider,
   ComputeProviderCtx,
@@ -375,6 +375,97 @@ async function provisionVM(
   }
 
   return { ip, sshReady };
+}
+
+export interface SpawnVMOpts {
+  droplet: Record<string, unknown>;
+  userData: string;
+  vmImage: string;
+  containerMode: boolean;
+  containerImage: string;
+  cacheDir: string;
+  log: LoggerInterface;
+  distro?: Distro;
+}
+
+export async function spawnVM(opts: SpawnVMOpts): Promise<void> {
+  const { droplet, userData, vmImage, containerMode, containerImage, cacheDir, log } = opts;
+  const containerName = `droplet-${droplet["id"]}`;
+
+  if (containerMode) {
+    try {
+      const distro = (droplet["image"] as Record<string, string>)?.slug ?? opts.distro ?? "ubuntu";
+      const info = await runContainer(userData, {
+        distro: distro as Distro,
+        containerName,
+        imageTag: containerImage,
+        onIp(ip: string, name: string) {
+          droplet["networks"] = { v4: [{ ip_address: ip, type: "public" }] };
+          droplet["containerName"] = name;
+        },
+      });
+      droplet["networks"] = { v4: [{ ip_address: info.ip, type: "public" }] };
+      droplet["containerName"] = info.containerName;
+      droplet["status"] = "active";
+      log.info("container droplet ready", { droplet_id: droplet["id"], ip: info.ip });
+    } catch (err) {
+      droplet["status"] = "off";
+      log.error("container spawn failed", { droplet_id: droplet["id"], error: String(err) });
+    }
+    return;
+  }
+
+  await Deno.mkdir(cacheDir, { recursive: true });
+  const udFile = await Deno.makeTempFile({ dir: cacheDir, prefix: "userdata-", suffix: ".yaml" });
+  await Deno.writeTextFile(udFile, userData);
+
+  await dockerRun(["rm", "-f", containerName]).catch(() => {});
+
+  const distro = (droplet["image"] as Record<string, string>)?.slug ?? "ubuntu";
+
+  const { code } = await new Deno.Command("docker", {
+    args: [
+      "run", "-d",
+      "--name", containerName,
+      "--memory", "6g",
+      "--memory-swap", "6g",
+      "--device", "/dev/kvm",
+      "-v", `${cacheDir}:/root/.cache/simple-qemu`,
+      "-v", `${udFile}:/tmp/user-data:ro`,
+      "-e", "USER_DATA_FILE=/tmp/user-data",
+      vmImage,
+      `--distro=${distro}`,
+    ],
+    stdout: "inherit",
+    stderr: "inherit",
+  }).output();
+
+  if (code !== 0) {
+    droplet["status"] = "off";
+    await Deno.remove(udFile).catch(() => {});
+    return;
+  }
+
+  (async () => {
+    try {
+      await new Promise((r) => setTimeout(r, 2_000));
+      const ip = await dockerInspectIp(containerName);
+      log.info("container IP assigned", { droplet_id: droplet["id"], ip });
+      const up = await pollSsh(ip);
+      if (up) {
+        droplet["networks"] = { v4: [{ ip_address: ip, type: "public" }] };
+        droplet["containerName"] = containerName;
+        droplet["status"] = "active";
+        log.info("SSH ready", { droplet_id: droplet["id"], ip });
+      } else {
+        log.warn("SSH timeout", { droplet_id: droplet["id"], ip });
+      }
+    } catch (err) {
+      log.error("IP/SSH probe failed", { droplet_id: droplet["id"], error: String(err) });
+    } finally {
+      await Deno.remove(udFile).catch(() => {});
+    }
+  })();
 }
 
 export function injectAcceptBundle(

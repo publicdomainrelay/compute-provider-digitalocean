@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/common";
 import type { LoggerInterface } from "@publicdomainrelay/common";
 import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider";
+import { configureRbac, type GitRbacContext } from "@publicdomainrelay/rbac-git";
 
 export interface DropletCreateRequest {
   name: string;
@@ -39,6 +40,11 @@ export interface ComputeProviderDigitalOceanFactoryOptions {
   digitaloceanBaseUrl: string;
   doToken: string;
   log: LoggerInterface;
+  gitRbac?: {
+    rbacRepoRoot: string;
+    digitaloceanBaseUrl: string;
+    doToken: string;
+  };
 }
 
 function extractBearer(authHeader: string | undefined): string {
@@ -147,6 +153,24 @@ export function createComputeProviderDigitalOceanFactory(
         try {
           const actx = c.get("actx");
           log.info("droplets.create -> DO proxy", { name: body.name, actx });
+
+          if (opts.gitRbac) {
+            await configureRbac(
+              { role: "provision" },
+              actx,
+              {
+                teamUuid: actx,
+                rbacRepoRoot: opts.gitRbac.rbacRepoRoot,
+                digitaloceanBaseUrl: opts.gitRbac.digitaloceanBaseUrl,
+                doToken: opts.gitRbac.doToken,
+                log: (level, msg, meta) => {
+                  if (level === "info") log.info(msg, meta);
+                  else if (level === "error") log.error(msg, meta);
+                  else log.info(msg, meta);
+                },
+              },
+            ).catch((err) => log.warn("rbac git push failed, continuing", { error: String(err) }));
+          }
 
           const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets`, {
             method: "POST",
