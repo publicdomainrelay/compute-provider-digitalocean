@@ -1,10 +1,18 @@
 import { Command } from "@cliffy/command";
 import { createLogger } from "@publicdomainrelay/common";
-import { computeProviderModeFromEnv } from "@publicdomainrelay/compute-provider";
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
 import { createComputeProviderDigitalOceanFactory } from "@publicdomainrelay/hono-factory-compute-provider-digitalocean";
 
 const log = createLogger("hono-compute-provider");
+
+function homeDir(): string {
+  const h = Deno.env.get("HOME");
+  if (!h) {
+    console.error("HOME environment variable is not set.");
+    Deno.exit(1);
+  }
+  return h;
+}
 
 async function main() {
   const { options } = await new Command()
@@ -14,13 +22,13 @@ async function main() {
     .option("-p, --port <port:number>", "HTTP port", { default: 8080 })
     .option("--provider <mode:string>", "Compute provider: local or digitalocean", { default: "local" })
     .option("--container-mode [mode:boolean]", "Use container mode instead of QEMU (local only)", { default: true })
-    .option("--vm-image <image:string>", "Docker image for QEMU VMs")
-    .option("--container-image <image:string>", "Docker image for container runner")
-    .option("--cache-dir <dir:string>", "Cache directory")
+    .option("--vm-image <image:string>", "Docker image for QEMU VMs", { default: "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner" })
+    .option("--container-image <image:string>", "Docker image for container runner", { default: "container-runner-ubuntu:latest" })
+    .option("--cache-dir <dir:string>", "Cache directory for temp files")
     .option("--issuer-url <url:string>", "OIDC issuer URL")
-    .option("--operator-handle <did:string>", "Operator handle DID")
-    .option("--self-did <did:string>", "This host DID")
-    .option("--digitalocean-base-url <url:string>", "DO API base URL")
+    .option("--operator-handle <did:string>", "Operator handle DID", { default: "did:plc:localhost" })
+    .option("--self-did <did:string>", "This host DID", { default: "did:plc:localhost" })
+    .option("--digitalocean-base-url <url:string>", "DO API base URL", { default: "https://droplet-oidc.its1337.com" })
     .option("--do-token <token:string>", "DO API token")
     .env("PORT=<port:number>", "HTTP port")
     .env("COMPUTE_PROVIDER=<mode:string>", "Provider mode")
@@ -35,32 +43,18 @@ async function main() {
     .env("DO_TOKEN=<token:string>", "DO token")
     .parse(Deno.args);
 
-  const port = options.port as number ?? 8080;
-  const providerMode = (options.provider as string)?.toLowerCase() === "digitalocean"
+  const port = options.port as number;
+  const providerMode = (options.provider as string) === "digitalocean"
     ? "digitalocean" as const
     : "local" as const;
 
-  const issuerUrl = (options.issuerUrl as string) ||
-    Deno.env.get("ISSUER_URL") ||
-    Deno.env.get("THIS_ENDPOINT") ||
-    `http://localhost:${port}`;
-
-  const operatorHandle = (options.operatorHandle as string) || Deno.env.get("OPERATOR_HANDLE") || "did:plc:localhost";
-  const selfDid = (options.selfDid as string) || Deno.env.get("SELF_DID") || "did:plc:localhost";
-
-  const cacheDir = (options.cacheDir as string) ||
-    Deno.env.get("CACHE_DIR") ||
-    `${Deno.env.get("HOME")}/.cache/pdr-local`;
-
-  const vmImage = (options.vmImage as string) ||
-    Deno.env.get("VM_IMAGE") ||
-    "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner";
-
-  const containerImage = (options.containerImage as string) ||
-    Deno.env.get("CONTAINER_IMAGE") ||
-    "container-runner-ubuntu:latest";
-
-  const containerMode = options.containerMode as boolean ?? true;
+  const issuerUrl = (options.issuerUrl as string) || `http://localhost:${port}`;
+  const operatorHandle = options.operatorHandle as string;
+  const selfDid = options.selfDid as string;
+  const cacheDir = (options.cacheDir as string) || `${homeDir()}/.cache/pdr-local`;
+  const vmImage = options.vmImage as string;
+  const containerImage = options.containerImage as string;
+  const containerMode = options.containerMode as boolean;
 
   log.info("starting compute provider", {
     port,
@@ -86,16 +80,12 @@ async function main() {
     app = factory.createApp();
     killAll = () => factory.killAllDroplets();
   } else {
-    const digitaloceanBaseUrl = (options.digitaloceanBaseUrl as string) ||
-      Deno.env.get("DIGITALOCEAN_BASE_URL") ||
-      "https://droplet-oidc.its1337.com";
-    const doToken = (options.doToken as string) || Deno.env.get("DO_TOKEN") || "";
-
+    const digitaloceanBaseUrl = options.digitaloceanBaseUrl as string;
+    const doToken = options.doToken as string;
     if (!doToken) {
       log.error("DO_TOKEN is required for digitalocean provider");
       Deno.exit(1);
     }
-
     const factory = createComputeProviderDigitalOceanFactory({
       operatorHandle,
       selfDid,
