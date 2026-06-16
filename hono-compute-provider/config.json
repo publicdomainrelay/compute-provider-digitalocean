@@ -1,0 +1,8 @@
+{
+  "port": 8080,
+  "provider": "local",
+  "containerMode": true,
+  "containerImage": "container-runner-ubuntu:latest",
+  "vmImage": "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner",
+  "digitaloceanBaseUrl": "https://droplet-oidc.its1337.com"
+}

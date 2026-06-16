@@ -1,0 +1,619 @@
+import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
+import type { Logger } from "@publicdomainrelay/common";
+import type {
+  ComputeProvider,
+  ComputeProviderCtx,
+  DropletSpec,
+  ProvisionResult,
+  StrongRef,
+  VM,
+} from "@publicdomainrelay/compute-provider";
+import { dropletSpecFromEnv } from "@publicdomainrelay/compute-provider";
+
+export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
+  acceptPathVm?: string;
+  containerMode?: "vm" | "container";
+  vmImage?: string;
+  containerImage?: string;
+  cacheDir?: string;
+  getAgentDid: () => string;
+  getIssuerUrl: () => string;
+  createRecord?: (
+    collection: string,
+    record: Record<string, unknown>,
+  ) => Promise<StrongRef>;
+  deleteRecord?: (collection: string, rkey: string) => Promise<void>;
+}
+
+type Distro = "fedora" | "ubuntu";
+
+export interface ContainerOptions {
+  distro?: Distro;
+  memory?: string;
+  imageTag?: string;
+  containerName?: string;
+  onIp?: (ip: string, containerName: string) => void | Promise<void>;
+}
+
+export interface ContainerInfo {
+  ip: string;
+  containerName: string;
+}
+
+const COMPUTE_CONFIG_WIF_SIMPLE_NSID =
+  "com.publicdomainrelay.temp.compute.config.wif.simple";
+
+const DEFAULT_ACCEPT_PATH_VM =
+  "/root/secrets/publicdomainrelay.com/market/accept.json";
+
+const HOME = Deno.env.get("HOME");
+if (!HOME) {
+  console.error("HOME environment variable is not set.");
+  Deno.exit(1);
+}
+
+const POLL_TIMEOUT_MS = 300_000;
+const SSH_DEFAULT_PORT = 22;
+const MEMORY_DEFAULT = "512m";
+
+export const DEFAULT_USER_DATA = `#cloud-config
+users:
+  - name: agent
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+chpasswd:
+  expire: False
+  users:
+  - name: agent
+    password: agent
+    type: text
+ssh_pwauth: true
+`;
+
+function defaultCacheDir(): string {
+  return `${HOME}/.cache/pdr-local`;
+}
+
+function shortUuid(): string {
+  return crypto.randomUUID().slice(0, 8);
+}
+
+async function dockerRun(
+  args: string[],
+  opts?: { inherit?: boolean },
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const cmd = new Deno.Command("docker", {
+    args,
+    stdout: opts?.inherit ? "inherit" : "piped",
+    stderr: opts?.inherit ? "inherit" : "piped",
+  });
+  const out = await cmd.output();
+  return {
+    code: out.code,
+    stdout: opts?.inherit ? "" : new TextDecoder().decode(out.stdout).trim(),
+    stderr: opts?.inherit ? "" : new TextDecoder().decode(out.stderr).trim(),
+  };
+}
+
+export async function dockerInspectIp(containerName: string): Promise<string> {
+  const { code, stdout } = await dockerRun([
+    "inspect", "--format",
+    "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+    containerName,
+  ]);
+  if (code !== 0) throw new Error(`docker inspect failed for ${containerName}`);
+  return stdout;
+}
+
+export async function pollSsh(
+  host: string,
+  port: number = SSH_DEFAULT_PORT,
+  timeoutMs: number = POLL_TIMEOUT_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const conn = await Deno.connect({ hostname: host, port });
+      conn.close();
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  return false;
+}
+
+async function imageExists(tag: string): Promise<boolean> {
+  const { code, stdout } = await dockerRun(["images", "-q", tag]);
+  return code === 0 && stdout.length > 0;
+}
+
+async function pullImage(
+  image: string,
+  log: Logger,
+): Promise<void> {
+  log("info", "pulling image", { image });
+  const { code, stderr } = await dockerRun(["pull", image], { inherit: true });
+  if (code !== 0) throw new Error(`docker pull failed for ${image}: ${stderr}`);
+}
+
+function imageTag(distro: Distro): string {
+  return `container-runner-${distro}:latest`;
+}
+
+function generateEntrypoint(_distro: Distro): string {
+  return `#!/bin/bash
+set -e
+echo "[container-entrypoint] Launching systemctl-shim as PID 1"
+
+if [ -f /usr/local/bin/systemctl-shim.ts ]; then
+  cat > /usr/local/bin/systemctl << 'SHEOF'
+#!/bin/bash
+exec deno run -A /usr/local/bin/systemctl-shim.ts "$@"
+SHEOF
+  chmod +x /usr/local/bin/systemctl
+fi
+
+exec deno run -A /usr/local/bin/systemctl-shim.ts --init
+`;
+}
+
+function generateDockerfile(distro: Distro): string {
+  const base = distro === "fedora"
+    ? `FROM fedora:latest
+RUN dnf install -y \\
+    cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip python3 \\
+  && dnf clean all`
+    : `FROM ubuntu:latest
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \\
+    cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip ca-certificates locales python3 \\
+  && rm -rf /var/lib/apt/lists/*`;
+
+  return `${base}
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+`;
+}
+
+export async function buildContainerImage(
+  distro: Distro = "ubuntu",
+): Promise<string> {
+  const tag = imageTag(distro);
+
+  if (await imageExists(tag)) {
+    console.log(`==> Image ${tag} already exists. Skipping build.`);
+    return tag;
+  }
+
+  console.log(`==> Building container image for ${distro}...`);
+
+  const buildDir = await Deno.makeTempDir({ prefix: "container-build-" });
+  try {
+    await Deno.writeTextFile(
+      `${buildDir}/entrypoint.sh`,
+      generateEntrypoint(distro),
+    );
+    await Deno.chmod(`${buildDir}/entrypoint.sh`, 0o755);
+
+    await Deno.writeTextFile(
+      `${buildDir}/Dockerfile`,
+      generateDockerfile(distro),
+    );
+
+    const { code } = await new Deno.Command("docker", {
+      args: [
+        "build",
+        "--pull",
+        "--progress", "plain",
+        "-t", tag,
+        buildDir,
+      ],
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output();
+
+    if (code !== 0) {
+      throw new Error(`docker build failed for ${tag}`);
+    }
+
+    console.log(`==> Built container image: ${tag}`);
+    return tag;
+  } finally {
+    await Deno.remove(buildDir, { recursive: true }).catch(() => {});
+  }
+}
+
+async function copySystemctlShim(
+  distro: Distro,
+  cacheDir: string,
+): Promise<string> {
+  const systemctlShimSrc = new URL(
+    "./systemctl-shim.ts",
+    import.meta.url,
+  ).pathname;
+  const dst = `${cacheDir}/systemctl-shim-${distro}.ts`;
+  await Deno.copyFile(systemctlShimSrc, dst);
+  return dst;
+}
+
+export async function runContainer(
+  userData: string,
+  opts: ContainerOptions = {},
+): Promise<ContainerInfo> {
+  const distro = opts.distro ?? "ubuntu";
+  const tag = opts.imageTag ?? imageTag(distro);
+  const memory = opts.memory ?? MEMORY_DEFAULT;
+  const containerName = opts.containerName ??
+    `container-${crypto.randomUUID().slice(0, 8)}`;
+
+  console.log(`==> Starting container (${distro}, tag=${tag})`);
+
+  if (!(await imageExists(tag))) {
+    console.log(`==> Image ${tag} not found. Building...`);
+    await buildContainerImage(distro);
+  }
+
+  const cacheDir = defaultCacheDir();
+  await Deno.mkdir(cacheDir, { recursive: true });
+
+  const udFile = await Deno.makeTempFile({
+    dir: cacheDir,
+    prefix: "container-ud-",
+    suffix: ".yaml",
+  });
+  await Deno.writeTextFile(udFile, userData);
+
+  const entrypointScript = generateEntrypoint(distro);
+  const epFile = await Deno.makeTempFile({
+    dir: cacheDir,
+    prefix: "container-ep-",
+    suffix: ".sh",
+  });
+  await Deno.writeTextFile(epFile, entrypointScript);
+  await Deno.chmod(epFile, 0o755);
+
+  const systemctlShimTag = await copySystemctlShim(distro, cacheDir);
+
+  await dockerRun(["rm", "-f", containerName]).catch(() => {});
+
+  const { code, stderr } = await dockerRun([
+    "run", "-d",
+    "--name", containerName,
+    "--memory", memory,
+    "--memory-swap", memory,
+    "-v", `${udFile}:/tmp/user-data:ro`,
+    "-v", `${epFile}:/entrypoint.sh:ro`,
+    "-v", `${systemctlShimTag}:/usr/local/bin/systemctl-shim.ts:ro`,
+    "-e", "USER_DATA_FILE=/tmp/user-data",
+    tag,
+  ]);
+
+  if (code !== 0) {
+    await Deno.remove(udFile).catch(() => {});
+    await Deno.remove(epFile).catch(() => {});
+    throw new Error(
+      `docker run failed for ${containerName} (exit ${code}): ${stderr}`,
+    );
+  }
+
+  await new Promise((r) => setTimeout(r, 1_000));
+  const ip = await dockerInspectIp(containerName);
+  console.log(`==> Container IP: ${ip}`);
+
+  if (opts.onIp) await opts.onIp(ip, containerName);
+
+  console.log("==> Waiting for SSH...");
+  const ready = await pollSsh(ip, 22);
+  if (!ready) {
+    await Deno.remove(udFile).catch(() => {});
+    await Deno.remove(epFile).catch(() => {});
+    throw new Error(
+      `SSH not ready within timeout for ${containerName} (ip=${ip})`,
+    );
+  }
+
+  console.log(`==> SSH ready! ssh agent@${ip}`);
+  console.log(`    Container: ${containerName}`);
+
+  await Deno.remove(udFile).catch(() => {});
+  await Deno.remove(epFile).catch(() => {});
+
+  return { ip, containerName };
+}
+
+async function provisionVM(
+  vm: VM,
+  containerName: string,
+  user_data: string,
+  ds: DropletSpec,
+  cacheDir: string,
+  vmImage: string,
+  log: Logger,
+): Promise<{ ip: string; sshReady: boolean }> {
+  log("info", "provisioning VM", { containerName, image: vmImage });
+
+  await pullImage(vmImage, log);
+
+  const udFile = `${cacheDir}/ud-${containerName}.yaml`;
+  await Deno.writeTextFile(udFile, user_data);
+
+  await dockerRun(["rm", "-f", containerName]).catch(() => {});
+
+  const { code, stderr } = await dockerRun([
+    "run", "-d",
+    "--name", containerName,
+    "--privileged",
+    "--memory", "6g",
+    "--memory-swap", "6g",
+    "--device", "/dev/kvm",
+    "-v", `${cacheDir}:/root/.cache/simple-qemu`,
+    "-v", `${udFile}:/tmp/user-data:ro`,
+    "-e", "USER_DATA_FILE=/tmp/user-data",
+    vmImage,
+    `--distro=${ds.image ?? "ubuntu"}`,
+  ]);
+
+  if (code !== 0) {
+    throw new Error(`docker run failed for ${containerName}: ${stderr}`);
+  }
+
+  await new Promise((r) => setTimeout(r, 2_000));
+
+  let ip = "0.0.0.0";
+  try {
+    ip = await dockerInspectIp(containerName);
+    log("info", "VM container IP", { containerName, ip });
+  } catch {
+    log("warn", "could not get VM container IP", { containerName });
+  }
+
+  const sshReady = await pollSsh(ip, 22, POLL_TIMEOUT_MS);
+  if (!sshReady) {
+    log("warn", "SSH not ready within timeout", { containerName, ip });
+  }
+
+  return { ip, sshReady };
+}
+
+export function injectAcceptBundle(
+  userData: string,
+  bundle: Record<string, unknown>,
+  acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
+): string {
+  let obj: Record<string, unknown> = {};
+  try {
+    const parsed = userData
+      ? yamlParse(userData.replace(/^#cloud-config\s*/i, ""))
+      : null;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      obj = parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* fall through with empty obj */
+  }
+
+  const writeFiles = (obj["write_files"] as unknown[]) ?? (obj["write_files"] = []) as unknown[];
+  writeFiles.push({
+    path: acceptPathVm,
+    owner: "root:root",
+    permissions: "0600",
+    content: JSON.stringify(bundle, null, 2),
+  });
+
+  const runcmd = (obj["runcmd"] as unknown[]) ?? (obj["runcmd"] = []) as unknown[];
+  const parent = acceptPathVm.split("/").slice(0, -1).join("/");
+  runcmd.unshift([
+    "sh",
+    "-c",
+    `install -d -m 0700 -o root -g root ${parent}`,
+  ]);
+
+  return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
+}
+
+interface LocalDroplet {
+  id: string;
+  name: string;
+  networks: { v4: { ip_address: string; type: string }[] };
+  tags: string[];
+  containerName?: string;
+}
+
+export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
+  const { log, parseAtUri, getAgentDid, getIssuerUrl, createRecord, deleteRecord } = ctx;
+  const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
+  const containerMode = ctx.containerMode ??
+    (Deno.env.get("CONTAINER_MODE") === "true" ? "container" : "vm");
+  const vmImage = ctx.vmImage ??
+    Deno.env.get("VM_IMAGE") ??
+    "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner";
+  const containerImage = ctx.containerImage ??
+    Deno.env.get("CONTAINER_IMAGE") ??
+    "container-runner-ubuntu:latest";
+  const cacheDir = ctx.cacheDir ??
+    Deno.env.get("CACHE_DIR") ??
+    defaultCacheDir();
+
+  const droplets = new Map<string, LocalDroplet>();
+
+  async function provisionLocal(
+    vm: VM,
+    requesterDid: string,
+    spec?: DropletSpec,
+  ): Promise<{ result: ProvisionResult; rbacRef?: StrongRef }> {
+    const ds = spec ?? dropletSpecFromEnv();
+    const agentDidPlc = getAgentDid().split(":").pop() ?? "unknown";
+    const requesterPlc = requesterDid.split(":").pop() ?? "unknown";
+    const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
+    const containerName = `pdr-${requesterPlc}-${rfpRkey}-${shortUuid()}`;
+
+    await Deno.mkdir(cacheDir, { recursive: true });
+
+    let rbacRef: StrongRef | undefined;
+    if (createRecord) {
+      rbacRef = await createRecord("com.fedproxy.rbac", {
+        $type: "com.fedproxy.rbac",
+        protects: {
+          [`ex-${agentDidPlc}-${requesterPlc}-${vm.role}`]: {
+            service: getIssuerUrl(),
+            scope: "droplets.wid",
+          },
+        },
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    const droplet: LocalDroplet = {
+      id: containerName,
+      name: containerName,
+      networks: { v4: [] },
+      tags: [`oidc-sub:plc:${requesterPlc}`, `oidc-sub:role:${vm.role}`],
+    };
+    droplets.set(containerName, droplet);
+
+    const user_data = vm.user_data ?? DEFAULT_USER_DATA;
+
+    if (containerMode === "container") {
+      log("info", "provisioning container", {
+        containerName,
+        image: containerImage,
+      });
+
+      const info = await runContainer(user_data, {
+        distro: (ds.image as Distro | undefined) ?? "ubuntu",
+        containerName,
+        imageTag: containerImage,
+        onIp: (ip, name) => {
+          droplet.networks.v4 = [{ ip_address: ip, type: "public" }];
+          droplet.containerName = name;
+        },
+      });
+
+      droplet.networks.v4 = [{ ip_address: info.ip, type: "public" }];
+      droplet.containerName = info.containerName;
+
+      return {
+        result: {
+          providerId: containerName,
+          metadata: {
+            containerName,
+            ip: info.ip,
+            mode: "container",
+            sshReady: true,
+          },
+        },
+        rbacRef,
+      };
+    }
+
+    const { ip, sshReady } = await provisionVM(
+      vm,
+      containerName,
+      user_data,
+      ds,
+      cacheDir,
+      vmImage,
+      log,
+    );
+
+    droplet.networks.v4 = [{ ip_address: ip, type: "public" }];
+    droplet.containerName = containerName;
+
+    return {
+      result: {
+        providerId: containerName,
+        metadata: {
+          containerName,
+          ip,
+          mode: "vm",
+          sshReady,
+        },
+      },
+      rbacRef,
+    };
+  }
+
+  async function destroyLocal(id: string | number): Promise<void> {
+    const name = String(id);
+    log("info", "destroying container", { containerName: name });
+    await dockerRun(["kill", name]).catch(() => {});
+    await dockerRun(["rm", "-f", name]).catch(() => {});
+    droplets.delete(name);
+  }
+
+  async function createBidConfig(nowIso: string): Promise<StrongRef> {
+    if (createRecord) {
+      return createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
+        $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
+        accept_path: acceptPathVm,
+        issuer_uri: getIssuerUrl(),
+        to_issue: "exchange-custom-droplet-oidc-poc",
+        actx: getAgentDid().split(":").slice(-1)[0],
+        actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
+        token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
+        url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
+        url_route: "/v1/oidc/issue",
+        subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
+        createdAt: nowIso,
+      });
+    }
+    return {
+      $type: "com.atproto.repo.strongRef",
+      uri: `at://${getAgentDid()}/${COMPUTE_CONFIG_WIF_SIMPLE_NSID}/self`,
+      cid: "local-noop",
+    };
+  }
+
+  return {
+    provisionLocal,
+    destroyLocal,
+    createBidConfig,
+    injectAcceptBundle: (userData: string, bundle: Record<string, unknown>) =>
+      injectAcceptBundle(userData, bundle, acceptPathVm),
+    getDroplet: (id: string): Record<string, unknown> | undefined =>
+      droplets.get(id) as Record<string, unknown> | undefined,
+  };
+}
+
+export function createLocalComputeProvider(
+  ctx: ComputeProviderLocalCtx,
+): ComputeProvider {
+  const {
+    provisionLocal,
+    destroyLocal,
+    createBidConfig,
+    injectAcceptBundle: injectBundle,
+    getDroplet,
+  } = createComputeProviderLocal(ctx);
+
+  const rbacByProvider = new Map<string | number, StrongRef>();
+
+  return {
+    name: "local",
+
+    async provision(
+      vm: VM,
+      requesterDid: string,
+      spec?: DropletSpec,
+    ): Promise<ProvisionResult> {
+      const { result, rbacRef } = await provisionLocal(vm, requesterDid, spec);
+      if (rbacRef) rbacByProvider.set(result.providerId, rbacRef);
+      return result;
+    },
+
+    async destroy(id: string | number): Promise<void> {
+      const rbacRef = rbacByProvider.get(id);
+      if (rbacRef && ctx.deleteRecord) {
+        const { collection, rkey } = ctx.parseAtUri(rbacRef.uri);
+        await ctx.deleteRecord(collection, rkey).catch(() => {});
+        rbacByProvider.delete(id);
+      }
+      await destroyLocal(id);
+    },
+
+    createBidConfig,
+    injectAcceptBundle: injectBundle,
+  };
+}

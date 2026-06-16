@@ -1,0 +1,10 @@
+{
+  "name": "@publicdomainrelay/hono-compute-provider",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "hono": "npm:hono@^4",
+    "@cliffy/command": "jsr:@cliffy/command@^1.0.0-rc.7"
+  }
+}

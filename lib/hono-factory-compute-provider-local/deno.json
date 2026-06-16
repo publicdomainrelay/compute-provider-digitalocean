@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/hono-factory-compute-provider-local",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "hono": "npm:hono@^4"
+  }
+}

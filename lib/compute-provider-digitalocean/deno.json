@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/compute-provider-digitalocean",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "yaml": "npm:yaml@^2.7.0"
+  }
+}

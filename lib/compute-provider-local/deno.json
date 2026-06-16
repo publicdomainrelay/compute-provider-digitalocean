@@ -1,0 +1,12 @@
+{
+  "name": "@publicdomainrelay/compute-provider-local",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "compilerOptions": {
+    "lib": ["deno.ns", "deno.unstable", "dom", "esnext"]
+  },
+  "imports": {
+    "yaml": "npm:yaml@^2.7.0"
+  }
+}
