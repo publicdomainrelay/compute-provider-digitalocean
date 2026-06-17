@@ -1,5 +1,6 @@
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
+import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
 import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider-abc";
 import { spawnVM } from "@publicdomainrelay/compute-provider-local";
@@ -130,6 +131,7 @@ export function createComputeProviderLocalFactory(
   const factory = createFactory<ComputeProviderLocalEnv>({
     initApp: (app) => {
       app.use("*", cors());
+      registerErrorMiddleware(app, log);
 
       app.use("*", async (c, next) => {
         log.info("request", { method: c.req.method, path: c.req.path });

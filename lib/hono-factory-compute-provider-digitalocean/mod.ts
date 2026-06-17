@@ -1,5 +1,6 @@
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
+import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
 import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
 import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
@@ -106,6 +107,7 @@ export function createComputeProviderDigitalOceanFactory(
   const factory = createFactory<ComputeProviderDigitalOceanEnv>({
     initApp: (app) => {
       app.use("*", cors());
+      registerErrorMiddleware(app, log);
 
       app.use("*", async (c, next) => {
         log.info("request", { method: c.req.method, path: c.req.path });
