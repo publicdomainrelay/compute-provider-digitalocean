@@ -65,6 +65,12 @@
       "env": "DO_TOKEN",
       "description": "DigitalOcean API token"
     },
+    "hostname": {
+      "type": "string",
+      "env": "HOSTNAME",
+      "default": "0.0.0.0",
+      "description": "Hostname to bind to"
+    },
     "log-level": {
       "type": "string",
       "env": "LOG_LEVEL",

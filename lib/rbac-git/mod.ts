@@ -5,6 +5,7 @@ export interface GitRbacContext {
   rbacRepoRoot: string;
   digitaloceanBaseUrl: string;
   doToken: string;
+  homeDir?: string;
   log?: (level: string, msg: string, meta?: Record<string, unknown>) => void;
 }
 
@@ -40,12 +41,13 @@ async function ensureGitRepo(
   digitaloceanBaseUrl: string,
   teamUuid: string,
   doToken: string,
+  homeDir: string,
   log: (level: string, msg: string, meta?: Record<string, unknown>) => void,
 ): Promise<void> {
   if (await isDir(`${rbac}/.git`)) return;
 
   await Deno.mkdir(rbac, { recursive: true });
-  const home = Deno.env.get("HOME") ?? "/root";
+  const home = homeDir;
   const credHelperDir = `${home}/.local/scripts`;
   const credHelperPath = `${credHelperDir}/git-credential-rbac-digitalocean.sh`;
   const credHelper = `#!/usr/bin/env bash
@@ -95,7 +97,7 @@ export async function configureRbac(
   const { teamUuid, rbacRepoRoot, digitaloceanBaseUrl, doToken } = ctx;
   const rbac = `${rbacRepoRoot}/${teamUuid}`;
 
-  await ensureGitRepo(rbac, digitaloceanBaseUrl, teamUuid, doToken, log);
+  await ensureGitRepo(rbac, digitaloceanBaseUrl, teamUuid, doToken, ctx.homeDir ?? "/root", log);
 
   const requesterPlc = requesterDid.split(":").slice(-1)[0];
   const slug = `${teamUuid}-${requesterPlc}-${vm.role}`;

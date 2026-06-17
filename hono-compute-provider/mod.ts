@@ -19,6 +19,7 @@ const { options } = await new Command(
 const log = createStructuredLogger("hono-compute-provider", options.logLevel as LogLevel);
 
 const port = options.port as number;
+const hostname = options.hostname as string;
 const providerMode = (options.provider as string) === "digitalocean"
   ? "digitalocean" as const
   : "local" as const;
@@ -81,6 +82,6 @@ Deno.addSignalListener("SIGINT", signalHandler);
 Deno.addSignalListener("SIGTERM", signalHandler);
 
 Deno.serve(
-  { port, hostname: "0.0.0.0", onListen: () => log.info("listening", { port }) },
+  { port, hostname, onListen: () => log.info("listening", { port }) },
   app.fetch,
 );

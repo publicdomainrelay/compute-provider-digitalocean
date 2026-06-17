@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
 import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider-abc";
-import { spawnVM } from "@publicdomainrelay/compute-provider-local";
+import { spawnVM, defaultCacheDir } from "@publicdomainrelay/compute-provider-local";
 import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
 
 export interface DropletCreateRequest {
@@ -207,7 +207,7 @@ export function createComputeProviderLocalFactory(
             vmImage: opts.vmImage,
             containerMode: opts.containerMode,
             containerImage: opts.containerImage,
-            cacheDir: opts.cacheDir ?? Deno.env.get("CACHE_DIR") ?? `${Deno.env.get("HOME") ?? "/tmp"}/.cache/pdr-local`,
+            cacheDir: opts.cacheDir ?? defaultCacheDir(),
             log,
           });
           return c.json({ droplet }, 202);
@@ -289,7 +289,7 @@ export function createComputeProviderLocalFactory(
         vmImage: opts.vmImage,
         containerMode: opts.containerMode,
         containerImage: opts.containerImage,
-        cacheDir: opts.cacheDir ?? Deno.env.get("CACHE_DIR") ?? `${Deno.env.get("HOME") ?? "/tmp"}/.cache/pdr-local`,
+        cacheDir: opts.cacheDir ?? defaultCacheDir(),
         log,
       });
 

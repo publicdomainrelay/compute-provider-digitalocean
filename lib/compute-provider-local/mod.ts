@@ -45,10 +45,10 @@ const COMPUTE_CONFIG_WIF_SIMPLE_NSID =
 const DEFAULT_ACCEPT_PATH_VM =
   "/root/secrets/publicdomainrelay.com/market/accept.json";
 
-const HOME = Deno.env.get("HOME");
-if (!HOME) {
-  console.error("HOME environment variable is not set.");
-  Deno.exit(1);
+function getHomeDir(): string {
+  const home = Deno.env.get("HOME");
+  if (!home) throw new Error("HOME environment variable is not set.");
+  return home;
 }
 
 const POLL_TIMEOUT_MS = 300_000;
@@ -80,8 +80,8 @@ function dropletSpecFromEnv(): {
   };
 }
 
-function defaultCacheDir(): string {
-  return `${HOME}/.cache/pdr-local`;
+export function defaultCacheDir(): string {
+  return `${getHomeDir()}/.cache/pdr-local`;
 }
 
 function shortUuid(): string {

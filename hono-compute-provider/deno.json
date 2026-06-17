@@ -1,10 +1,14 @@
 {
-  "name": "@publicdomainrelay/hono-compute-provider",
   "version": "0.0.0",
   "license": "Unlicense",
-  "exports": "./mod.ts",
   "imports": {
     "@publicdomainrelay/cli-args-env": "jsr:@publicdomainrelay/cli-args-env@^0",
     "hono": "npm:hono@^4"
+  },
+  "compile": {
+    "include": ["cli-args-env.json", "config.json"]
+  },
+  "publish": {
+    "include": ["cli-args-env.json"]
   }
 }

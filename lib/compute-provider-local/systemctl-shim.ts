@@ -1,33 +1,6 @@
 #!/usr/bin/env -S deno run -A
-/**
- * systemctl-shim — Deno systemctl emulator for containers without systemd.
- *
- * Architecture: desired-state reconciliation.
- *
- *   --init   PID 1 supervisor. Owns ALL service lifecycle. Generates SSH host
- *            keys, runs cloud-init, then runs a reconcile loop forever: every
- *            tick it reads the desired-state dir and ensures each wanted unit
- *            is running (spawn + restart policy). Services are direct children
- *            of PID 1, so their exit is reaped via `child.status` (no zombies).
- *
- *   <cmd>    `systemctl <command>` wrapper. Does NOT spawn services itself —
- *            it only records intent by touching files under the state dir.
- *            PID 1 picks the change up on the next reconcile tick. This keeps
- *            all supervision in one process and makes restart/stop coherent.
- *
- * Entrypoint:  exec deno run -A /usr/local/bin/systemctl-shim.ts --init
- * Wrapper:     deno run -A /usr/local/bin/systemctl-shim.ts <command> <args...>
- *
- * State dirs (under /run/systemctl):
- *   wanted/<unit>    desired-running units      (start / enable --now → create)
- *   enabled/<unit>   enabled-at-boot units      (enable → create)
- *   pids/<unit>      last spawned PID           (written by supervisor)
- *   exited/<unit>    oneshot exit code marker   (RemainAfterExit)
- */
 
-// ===========================================================================
 // State paths
-// ===========================================================================
 
 const STATEDIR = Deno.env.get("STATEDIR") ?? "/run/systemctl";
 const WANTED = `${STATEDIR}/wanted`;
@@ -53,29 +26,23 @@ async function ensureStateDirs() {
   }
 }
 
-// ===========================================================================
 // Unit-name helpers
-// ===========================================================================
 
-/** Append `.service` when no unit-type suffix is present. */
 function resolveUnitName(name: string): string {
   return name.includes(".") ? name : `${name}.service`;
 }
 
-/** Canonical unit name — collapses the ssh/sshd alias to `ssh.service`. */
 function canonical(name: string): string {
   const n = resolveUnitName(name);
   return n === "sshd.service" ? "ssh.service" : n;
 }
 
 function isSupervisableService(unitName: string): boolean {
-  // .path/.timer/.socket/etc. have no process to run in container mode.
+  
   return /\.service$/.test(unitName);
 }
 
-// ===========================================================================
 // INI parser (dependency-free; accumulates duplicate keys with "\n")
-// ===========================================================================
 
 type IniFile = Record<string, Record<string, string>>;
 
@@ -109,9 +76,7 @@ function parseIni(text: string): IniFile {
   return out;
 }
 
-// ===========================================================================
 // Unit model
-// ===========================================================================
 
 interface Unit {
   name: string;
@@ -143,16 +108,6 @@ function unitDefaults(name: string): Unit {
   };
 }
 
-/**
- * Built-in sshd unit — supervised even without a unit file on disk.
- *
- * cloud-init's cc_ssh module and the openssh-server package both try to manage
- * sshd themselves (SIGTERM-ing ours, or leaving a daemonized orphan on port 22),
- * which otherwise causes our restart loop to fight a competitor for the port.
- * The ExecStart kills any stray sshd first so the supervisor is the sole owner;
- * `-D` keeps it foreground so the supervisor (not a daemon fork) tracks it,
- * `-e` sends logs to stderr (container stdout).
- */
 function sshdUnit(): Unit {
   return {
     ...unitDefaults("ssh.service"),
@@ -196,7 +151,6 @@ async function parseUnitFile(path: string, name: string): Promise<Unit> {
   return u;
 }
 
-/** Resolve a unit by name — built-in sshd, or a unit file on disk. */
 async function resolveUnit(name: string): Promise<Unit | null> {
   const n = canonical(name);
   if (n === "ssh.service") return sshdUnit();
@@ -205,9 +159,7 @@ async function resolveUnit(name: string): Promise<Unit | null> {
   return await parseUnitFile(path, n);
 }
 
-// ===========================================================================
 // Condition / process helpers
-// ===========================================================================
 
 function checkConditions(unit: Unit): boolean {
   for (const cond of unit.conditionPathExists) {
@@ -216,11 +168,11 @@ function checkConditions(unit: Unit): boolean {
     let exists = false;
     try { Deno.statSync(path); exists = true; } catch { /* missing */ }
     if (negate && exists) {
-      log(`${unit.name}: ConditionPathExists=!${path} (exists) → skip`);
+      log(`${unit.name}: ConditionPathExists=!${path} (exists) -> skip`);
       return false;
     }
     if (!negate && !exists) {
-      log(`${unit.name}: ConditionPathExists=${path} (missing) → skip`);
+      log(`${unit.name}: ConditionPathExists=${path} (missing) -> skip`);
       return false;
     }
   }
@@ -246,12 +198,6 @@ function serviceExited(unitName: string): boolean {
   try { Deno.statSync(`${EXITED}/${canonical(unitName)}`); return true; } catch { return false; }
 }
 
-/**
- * Parse a systemd `Environment=` line into KEY=VALUE pairs. Handles the quoted
- * form `Environment="KEY=value"` and multiple space-separated assignments on
- * one line (`Environment="A=1" "B=2"`), stripping the surrounding quotes the
- * way systemd does.
- */
 function parseEnvLine(line: string): Array<[string, string]> {
   const tokens: string[] = [];
   let cur = "";
@@ -290,9 +236,7 @@ function commandOpts(unit: Unit, script: string): Deno.CommandOptions {
   return opts;
 }
 
-// ===========================================================================
 // Desired-state mutators (used by both command mode and the supervisor)
-// ===========================================================================
 
 async function want(name: string) {
   await ensureStateDirs();
@@ -328,11 +272,8 @@ async function clearPid(unitName: string) {
   await Deno.remove(`${PIDS}/${canonical(unitName)}`).catch(() => {});
 }
 
-// ===========================================================================
 // Supervisor (PID 1)
-// ===========================================================================
 
-/** Units the supervisor has already taken ownership of this process. */
 const supervised = new Set<string>();
 
 async function runExecStartPre(unit: Unit): Promise<boolean> {
@@ -347,12 +288,11 @@ async function runExecStartPre(unit: Unit): Promise<boolean> {
   return true;
 }
 
-/** Supervise one unit for the rest of its desired lifetime. Fire-and-forget. */
 async function superviseUnit(name: string): Promise<void> {
   const key = canonical(name);
   try {
     if (!isSupervisableService(key)) {
-      // .path/.timer/etc. — nothing to run; stay "owned" so we don't re-log.
+      
       return;
     }
 
@@ -364,7 +304,7 @@ async function superviseUnit(name: string): Promise<void> {
     }
 
     if (!checkConditions(unit)) {
-      await unwant(key); // condition unmet — consume the request, don't spin
+      await unwant(key); 
       return;
     }
 
@@ -380,16 +320,16 @@ async function superviseUnit(name: string): Promise<void> {
       if (unit.remainAfterExit) {
         await Deno.writeTextFile(`${EXITED}/${key}`, String(code));
       }
-      await unwant(key); // oneshot consumed
+      await unwant(key); 
       return;
     }
 
-    // simple / forking / notify — supervise with restart policy.
+    // simple / forking / notify -- supervise with restart policy.
     log(`Starting ${key} (${unit.type})`);
     while (isWanted(key)) {
       const child = new Deno.Command("bash", commandOpts(unit, unit.execStart)).spawn();
       await writePid(key, child.pid);
-      const { code } = await child.status; // direct child → reaped here
+      const { code } = await child.status; 
 
       if (!isWanted(key)) {
         log(`${key}: stopped (rc=${code})`);
@@ -398,7 +338,7 @@ async function superviseUnit(name: string): Promise<void> {
       const shouldRestart = unit.restart === "always" ||
         (unit.restart === "on-failure" && code !== 0);
       if (!shouldRestart) {
-        log(`${key}: exited rc=${code}, restart=${unit.restart} → done`);
+        log(`${key}: exited rc=${code}, restart=${unit.restart} -> done`);
         break;
       }
       log(`${key}: exited rc=${code}, restarting in ${unit.restartSec}s`);
@@ -406,12 +346,11 @@ async function superviseUnit(name: string): Promise<void> {
     }
     await clearPid(key);
   } finally {
-    // Allow a future `want` to re-trigger supervision.
+    
     supervised.delete(key);
   }
 }
 
-/** One reconcile pass: adopt every wanted unit we're not already running. */
 async function reconcile() {
   let names: string[] = [];
   try {
@@ -424,13 +363,11 @@ async function reconcile() {
     const key = canonical(name);
     if (supervised.has(key)) continue;
     supervised.add(key);
-    superviseUnit(key); // fire-and-forget; manages its own loop
+    superviseUnit(key); 
   }
 }
 
-// ===========================================================================
 // cloud-init bootstrap (run once, inside --init)
-// ===========================================================================
 
 const DEFAULT_USER_DATA = `#cloud-config
 users:
@@ -481,9 +418,7 @@ async function generateHostKeys() {
   }
 }
 
-// ===========================================================================
 // --init entrypoint (PID 1)
-// ===========================================================================
 
 async function initMode() {
   await ensureStateDirs();
@@ -496,23 +431,21 @@ async function initMode() {
   await reconcile();
 
   // Reconcile loop runs concurrently with cloud-init: runcmd writes wanted/
-  // markers (provisioning-token, setup-websocat, …) which we adopt each tick.
+  
   const timer = setInterval(() => { reconcile(); }, RECONCILE_INTERVAL_MS);
 
   await seedCloudInit();
   await runCloudInit();
 
   log("PID 1: reconcile loop active; supervising services");
-  // setInterval keeps the event loop alive — PID 1 never exits on its own.
+  
   void timer;
 }
 
-// ===========================================================================
 // systemctl command mode
-// ===========================================================================
 
 async function passthroughToRealSystemctl(): Promise<boolean> {
-  // If real systemd is PID 1 (QEMU path), defer to the real binary.
+  
   let isSystemd = false;
   try { isSystemd = (await Deno.readTextFile("/proc/1/comm")).trim() === "systemd"; } catch { /* */ }
   if (!isSystemd) {
@@ -527,7 +460,7 @@ async function passthroughToRealSystemctl(): Promise<boolean> {
 
 async function stopUnit(name: string) {
   const key = canonical(name);
-  await unwant(key); // tell supervisor to stop restarting
+  await unwant(key); 
 
   const pid = readPid(key);
   if (pid && pidAlive(pid)) {
@@ -567,7 +500,7 @@ async function commandMode() {
   let now = false;
   const units: string[] = [];
   for (const a of rest) {
-    if (a === "--no-block") continue; // accepted, irrelevant (supervisor is async)
+    if (a === "--no-block") continue; 
     else if (a === "--now") now = true;
     else units.push(a);
   }
@@ -591,7 +524,7 @@ async function commandMode() {
       break;
 
     case "start":
-      // Record intent only — PID 1 adopts and supervises on the next tick.
+      
       for (const u of units) await want(u);
       break;
 
@@ -620,8 +553,8 @@ async function commandMode() {
 
     case "status": {
       const u = canonical(units[0] ?? "");
-      console.log(`● ${u} - systemctl-shim`);
-      if (serviceRunning(u)) console.log(`   Active: active (running) — PID ${readPid(u)}`);
+      console.log(`* ${u} - systemctl-shim`);
+      if (serviceRunning(u)) console.log(`   Active: active (running) -- PID ${readPid(u)}`);
       else if (serviceExited(u)) console.log("   Active: active (exited)");
       else console.log("   Active: inactive (dead)");
       break;
@@ -638,9 +571,7 @@ async function commandMode() {
   }
 }
 
-// ===========================================================================
 // Entry
-// ===========================================================================
 
 if (Deno.args[0] === "--init") {
   initMode();
