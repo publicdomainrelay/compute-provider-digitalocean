@@ -4,12 +4,18 @@ import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0"
 import * as jose from "jose";
 import type { Logger } from "@publicdomainrelay/logger";
 import { noopLogger } from "@publicdomainrelay/logger";
+import {
+  JwkStore,
+  NonceStore,
+  type OIDCTokenData,
+  type OidcIssuerOptions,
+  type OidcIssuer,
+  type ProvisioningDataInit,
+  UnauthorizedException,
+  parseAudience,
+} from "@publicdomainrelay/oidc-issuer-abc";
 
-export type { Logger };
-
-class UnauthorizedException extends Error {
-  constructor(msg: string) { super(msg); this.name = "UnauthorizedException"; }
-}
+export type { Logger, JwkStore, NonceStore, OIDCTokenData, OidcIssuerOptions, OidcIssuer };
 
 function extractBearer(authHeader: string | undefined): string {
   if (!authHeader) throw new UnauthorizedException("Missing Authorization header");
@@ -24,23 +30,6 @@ function subMatchesActx(sub: string | undefined, actx: string): boolean {
   return sub === `actx:${actx}` || sub.startsWith(`actx:${actx}:`);
 }
 
-export function parseAudience(aud: string): { actx: string; api: string } {
-  const rest = aud.startsWith("api://") ? aud.slice(6) : null;
-  if (!rest) throw new UnauthorizedException(`aud does not start with api://: ${aud}`);
-  const qIdx = rest.indexOf("?");
-  if (qIdx < 0) throw new UnauthorizedException(`aud missing ?actx=: ${aud}`);
-  const api = rest.slice(0, qIdx);
-  const params = new URLSearchParams(rest.slice(qIdx + 1));
-  const actx = params.get("actx");
-  if (!actx) throw new UnauthorizedException(`aud missing actx param: ${aud}`);
-  return { actx, api };
-}
-
-export interface JwkStore {
-  getJwkPem(issuer: string): string | null;
-  saveJwkPem(issuer: string, pem: string): void;
-}
-
 function createMemoryJwkStore(): JwkStore {
   const m = new Map<string, string>();
   return {
@@ -49,10 +38,11 @@ function createMemoryJwkStore(): JwkStore {
   };
 }
 
-let _getIssuerUrl: () => string = () =>
-  Deno.env.get("ISSUER_URL") ?? Deno.env.get("THIS_ENDPOINT") ?? "http://localhost:8080";
+let _getIssuerUrl: () => string = () => {
+  throw new Error("oidc-issuer not configured: call configureOidc({ getIssuerUrl }) first");
+};
 let _jwkStore: JwkStore = createMemoryJwkStore();
-let _defaultTtlSeconds = Number(Deno.env.get("OIDC_DEFAULT_TTL_SECONDS") ?? 60 * 60 * 24);
+let _defaultTtlSeconds = 60 * 60 * 24;
 let _signingKey: CryptoKeyPair | null = null;
 let _publicJwk: jose.JWK | null = null;
 
@@ -117,15 +107,6 @@ function getRemoteJwks(jwksUri: string) {
     jwksCache.set(jwksUri, jose.createRemoteJWKSet(new URL(jwksUri)));
   }
   return jwksCache.get(jwksUri)!;
-}
-
-export interface OIDCTokenData {
-  actx: string;
-  api: string;
-  aud: string;
-  sub: string;
-  claims: Record<string, unknown>;
-  asString: string;
 }
 
 export class OIDCToken implements OIDCTokenData {
@@ -238,11 +219,6 @@ export class OIDCToken implements OIDCTokenData {
   }
 }
 
-export interface NonceStore {
-  createProvisioningNonce(nonce: string, dropletId: string): void;
-  getProvisioningNonceDropletId(nonce: string): string;
-}
-
 function createMemoryNonceStore(): NonceStore {
   const m = new Map<string, string>();
   return {
@@ -265,18 +241,12 @@ export function configureProvisioning(cfg: { nonceStore?: NonceStore }): void {
 const DEFAULT_NONCE_LEN = 64;
 const DEFAULT_TTL_SECONDS = 60 * 15;
 
-export interface ProvisioningDataInit {
-  nonce: string;
-  token: OIDCToken;
-  userData: string;
-}
-
 export class ProvisioningData {
   nonce: string;
   token: OIDCToken;
   userData: string;
 
-  private constructor(init: ProvisioningDataInit) {
+  private constructor(init: { nonce: string; token: OIDCToken; userData: string }) {
     this.nonce = init.nonce;
     this.token = init.token;
     this.userData = init.userData;
@@ -474,17 +444,6 @@ async function provisioningValidate(
   const valid = await validateSshSignature(publicKey, signature, token);
   if (!valid) return null;
   return { oidcToken, droplet };
-}
-
-export interface OidcIssuerOptions {
-  getIssuerUrl: () => string;
-  getDroplet: (id: string) => Record<string, unknown> | undefined;
-  log?: Logger;
-  onIssuerUrl?: (baseUrl: string) => void | Promise<void>;
-}
-
-export interface OidcIssuer {
-  app: Hono<{ Variables: { actx: string } }>;
 }
 
 export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {

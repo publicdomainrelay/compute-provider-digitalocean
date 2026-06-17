@@ -1,76 +1,75 @@
 {
-  "options": [
-    {
-      "name": "port",
-      "type": "integer",
+  "name": "hono-compute-provider",
+  "description": "Compute provider server — provisions droplets via local Docker or DigitalOcean API",
+  "options": {
+    "port": {
+      "type": "number",
       "env": "PORT",
       "default": 8080,
       "description": "HTTP port to listen on"
     },
-    {
-      "name": "provider",
+    "provider": {
       "type": "string",
       "env": "COMPUTE_PROVIDER",
       "default": "local",
       "description": "Compute provider mode: local or digitalocean"
     },
-    {
-      "name": "container-mode",
+    "container-mode": {
       "type": "boolean",
       "env": "CONTAINER_MODE",
       "default": true,
       "description": "Use container mode instead of QEMU (local only)"
     },
-    {
-      "name": "vm-image",
+    "vm-image": {
       "type": "string",
       "env": "VM_IMAGE",
       "default": "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner",
       "description": "Docker image for QEMU VMs (local only)"
     },
-    {
-      "name": "container-image",
+    "container-image": {
       "type": "string",
       "env": "CONTAINER_IMAGE",
       "default": "container-runner-ubuntu:latest",
       "description": "Docker image for container runner (local only)"
     },
-    {
-      "name": "cache-dir",
+    "cache-dir": {
       "type": "string",
       "env": "CACHE_DIR",
       "description": "Cache directory for temp files (local only)"
     },
-    {
-      "name": "issuer-url",
+    "issuer-url": {
       "type": "string",
       "env": "ISSUER_URL",
       "description": "OIDC issuer URL"
     },
-    {
-      "name": "operator-handle",
+    "operator-handle": {
       "type": "string",
       "env": "OPERATOR_HANDLE",
+      "default": "did:plc:localhost",
       "description": "Operator handle (DID)"
     },
-    {
-      "name": "self-did",
+    "self-did": {
       "type": "string",
       "env": "SELF_DID",
+      "default": "did:plc:localhost",
       "description": "This host's own DID"
     },
-    {
-      "name": "digitalocean-base-url",
+    "digitalocean-base-url": {
       "type": "string",
       "env": "DIGITALOCEAN_BASE_URL",
       "default": "https://droplet-oidc.its1337.com",
       "description": "DigitalOcean-compatible API base URL"
     },
-    {
-      "name": "do-token",
+    "do-token": {
       "type": "string",
       "env": "DO_TOKEN",
       "description": "DigitalOcean API token"
+    },
+    "log-level": {
+      "type": "string",
+      "env": "LOG_LEVEL",
+      "default": "info",
+      "description": "Minimum log level (debug, info, warn, error)"
     }
-  ]
+  }
 }

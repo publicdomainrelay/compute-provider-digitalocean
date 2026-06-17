@@ -8,7 +8,7 @@ import type {
   ProvisionResult,
   StrongRef,
   VM,
-} from "@publicdomainrelay/compute-provider";
+} from "@publicdomainrelay/compute-provider-abc";
 import { configureRbac, type RbacContext } from "@publicdomainrelay/rbac-atproto";
 
 export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {

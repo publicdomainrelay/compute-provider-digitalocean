@@ -2,5 +2,8 @@
   "name": "@publicdomainrelay/rbac-atproto",
   "version": "0.0.0",
   "license": "Unlicense",
-  "exports": "./mod.ts"
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/compute-provider-abc": "jsr:@publicdomainrelay/compute-provider-abc@^0"
+  }
 }

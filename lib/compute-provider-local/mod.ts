@@ -7,8 +7,7 @@ import type {
   ProvisionResult,
   StrongRef,
   VM,
-} from "@publicdomainrelay/compute-provider";
-import { dropletSpecFromEnv } from "@publicdomainrelay/compute-provider";
+} from "@publicdomainrelay/compute-provider-abc";
 
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   acceptPathVm?: string;
@@ -68,6 +67,18 @@ chpasswd:
     type: text
 ssh_pwauth: true
 `;
+
+function dropletSpecFromEnv(): {
+  region?: string;
+  size?: string;
+  image?: string;
+} {
+  return {
+    region: Deno.env.get("COMPUTE_PROVIDER_REGION") ?? "sfo3",
+    size: Deno.env.get("COMPUTE_PROVIDER_SIZE") ?? "s-1vcpu-512mb-10gb",
+    image: Deno.env.get("COMPUTE_PROVIDER_IMAGE") ?? "ubuntu",
+  };
+}
 
 function defaultCacheDir(): string {
   return `${HOME}/.cache/pdr-local`;

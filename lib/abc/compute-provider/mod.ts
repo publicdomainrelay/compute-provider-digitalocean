@@ -49,36 +49,6 @@ export interface ComputeProvider {
 
 export type ComputeProviderMode = "local" | "digitalocean";
 
-export function computeProviderModeFromEnv(): ComputeProviderMode {
-  const env = Deno.env.get("COMPUTE_PROVIDER")?.toLowerCase();
-  if (env === "local" || env === "digitalocean") return env;
-  const cli = Deno.env.get("COMPUTE_PROVIDER_CLI")?.toLowerCase();
-  if (cli === "local" || cli === "digitalocean") return cli;
-  return "local";
-}
-
-export function reqEnv(name: string): string {
-  const v = Deno.env.get(name);
-  if (!v) {
-    console.error(`env var ${name} is required`);
-    Deno.exit(1);
-  }
-  return v;
-}
-
-export function optUrl(name: string, fallback: string): string {
-  const v = Deno.env.get(name);
-  return (v ?? fallback).replace(/\/+$/, "");
-}
-
-export function dropletSpecFromEnv(): DropletSpec {
-  return {
-    region: Deno.env.get("COMPUTE_PROVIDER_REGION") ?? "sfo3",
-    size: Deno.env.get("COMPUTE_PROVIDER_SIZE") ?? "s-1vcpu-512mb-10gb",
-    image: Deno.env.get("COMPUTE_PROVIDER_IMAGE") ?? "ubuntu",
-  };
-}
-
 export function parseAtUri(uri: string): { repo: string; collection: string; rkey: string } {
   const u = new URL(uri);
   const parts = u.pathname.split("/").filter(Boolean);

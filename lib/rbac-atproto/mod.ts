@@ -1,4 +1,4 @@
-import type { StrongRef } from "@publicdomainrelay/compute-provider";
+import type { StrongRef } from "@publicdomainrelay/compute-provider-abc";
 
 const RBAC_NSID = "com.fedproxy.rbac";
 

@@ -4,6 +4,7 @@
   "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
+    "@publicdomainrelay/oidc-issuer-abc": "jsr:@publicdomainrelay/oidc-issuer-abc@^0",
     "@publicdomainrelay/logger": "jsr:@publicdomainrelay/logger@^0.2",
     "hono": "npm:hono@^4",
     "jose": "npm:jose@^5",

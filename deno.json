@@ -3,6 +3,7 @@
   "workspace": [
     "./lib/common/compute-provider-common",
     "./lib/abc/compute-provider",
+    "./lib/abc/oidc-issuer",
     "./lib/compute-provider-local",
     "./lib/compute-provider-digitalocean",
     "./lib/rbac-atproto",

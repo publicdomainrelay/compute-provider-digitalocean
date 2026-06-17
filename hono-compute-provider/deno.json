@@ -4,7 +4,7 @@
   "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
-    "hono": "npm:hono@^4",
-    "@cliffy/command": "jsr:@cliffy/command@^1.0.0-rc.7"
+    "@publicdomainrelay/cli-args-env": "jsr:@publicdomainrelay/cli-args-env@^0",
+    "hono": "npm:hono@^4"
   }
 }

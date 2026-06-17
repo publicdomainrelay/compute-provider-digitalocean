@@ -7,6 +7,7 @@
     "lib": ["deno.ns", "deno.unstable", "dom", "esnext"]
   },
   "imports": {
+    "@publicdomainrelay/compute-provider-abc": "jsr:@publicdomainrelay/compute-provider-abc@^0",
     "yaml": "npm:yaml@^2.7.0"
   }
 }

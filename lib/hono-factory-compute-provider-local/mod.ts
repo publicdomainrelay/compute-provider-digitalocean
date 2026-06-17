@@ -1,7 +1,7 @@
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
-import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider";
+import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider-abc";
 import { spawnVM } from "@publicdomainrelay/compute-provider-local";
 import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
 
@@ -40,7 +40,7 @@ export interface ComputeProviderLocalFactoryOptions {
   vmImage: string;
   containerMode: boolean;
   containerImage: string;
-  cacheDir: string;
+  cacheDir?: string;
   log: LoggerInterface;
   getDroplet?: (id: string) => Record<string, unknown> | undefined;
   rbac?: {
@@ -205,7 +205,7 @@ export function createComputeProviderLocalFactory(
             vmImage: opts.vmImage,
             containerMode: opts.containerMode,
             containerImage: opts.containerImage,
-            cacheDir: opts.cacheDir,
+            cacheDir: opts.cacheDir ?? Deno.env.get("CACHE_DIR") ?? `${Deno.env.get("HOME") ?? "/tmp"}/.cache/pdr-local`,
             log,
           });
           return c.json({ droplet }, 202);
@@ -287,7 +287,7 @@ export function createComputeProviderLocalFactory(
         vmImage: opts.vmImage,
         containerMode: opts.containerMode,
         containerImage: opts.containerImage,
-        cacheDir: opts.cacheDir,
+        cacheDir: opts.cacheDir ?? Deno.env.get("CACHE_DIR") ?? `${Deno.env.get("HOME") ?? "/tmp"}/.cache/pdr-local`,
         log,
       });
 

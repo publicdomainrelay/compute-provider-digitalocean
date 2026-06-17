@@ -1,5 +1,5 @@
 {
-  "name": "@publicdomainrelay/compute-provider",
+  "name": "@publicdomainrelay/compute-provider-abc",
   "version": "0.0.0",
   "license": "Unlicense",
   "exports": "./mod.ts"
