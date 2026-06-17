@@ -1,0 +1,135 @@
+#cloud-config
+users:
+  - name: agent
+    gecos: Policy Engine Agent
+    primary_group: agent
+    groups:
+      - users
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    no_user_group: false
+
+write_files:
+
+  - path: /etc/systemd/system/policy-engine.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Policy Engine Service
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=agent
+      Group=agent
+      WorkingDirectory=/home/agent
+      Environment="BUNDLED_ACTIONS_DIR=/home/agent/bundled-actions"
+      ExecStart=/usr/local/bin/policy_engine --log-level trace api --bind 127.0.0.1:8080
+      Restart=always
+      RestartSec=5
+      TimeoutStopSec=10
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/bin/wait-for-health
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -x
+      set -euo pipefail
+      URL="$1/health"
+      ENDPOINT="$1"
+      MAX_ATTEMPTS=30
+      ATTEMPT=0
+      WAIT_SECS=0.1
+
+      tee /home/agent/workflow.yml <<'EOF'
+      name: 'build: containers'
+
+      on:
+        push:
+          branches:
+            - main
+
+      jobs:
+        check:
+          runs-on: ubuntu-latest
+          steps:
+            - name: checkout
+              # uses: actions/checkout@v4
+              run: |
+                set -x
+                set +e
+                git clone --depth=1 https://github.com/publicdomainrelay/compute-contract-reference-implementation-poc
+
+            - name: Print all files
+              run: |
+                echo "=== WORKSPACE ==="
+                find .
+                echo "=== DONE ==="
+      EOF
+
+      while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+        if curl -sf "$URL" | grep -q '"status":"ok"'; then
+          echo "Health check passed"
+
+          cat /home/agent/workflow.yml
+
+          # FIXED: Changed from my_workflow.yml to workflow.yml to match the write_files destination
+          TASK_ID=$(/usr/local/bin/policy_engine client -e "$ENDPOINT" create \
+            -w /home/agent/workflow.yml -R myorg/myrepo \
+            -i key=value \
+            | jq -r '.detail.id')
+
+          # Stream console output in real time (follows until done)
+          /usr/local/bin/policy_engine client -e "$ENDPOINT" output \
+            -t "$TASK_ID" --follow
+
+          # Check the final status (poll until complete)
+          /usr/local/bin/policy_engine client -e "$ENDPOINT" status \
+            -t "$TASK_ID" --wait
+
+          # Or get the status as YAML
+          /usr/local/bin/policy_engine client -e "$ENDPOINT" status \
+            -t "$TASK_ID" --wait --output-format yaml | tee /home/agent/workflow-status.yaml
+
+          echo "CLOUD_INIT_HEALTH_CHECK_PASSED"
+          exit 0
+        fi
+        ATTEMPT=$((ATTEMPT + 1))
+        echo "Health check attempt $ATTEMPT/$MAX_ATTEMPTS failed, retrying..."
+        sleep $WAIT_SECS
+      done
+
+      echo "Health check failed after $MAX_ATTEMPTS attempts"
+      exit 1
+
+runcmd:
+  - |
+    set -x
+
+    # curl -sfL -o /usr/local/bin/policy_engine 'https://bin--johnandersen777-bsky-social.fedproxy.com/policy-engine'
+    # chmod 755 /usr/local/bin/policy_engine
+    curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin
+
+    mkdir -pv /home/agent/
+    cd $(mktemp -d)
+    curl -L https://github.com/publicdomainrelay/sshai/archive/main.tar.gz | tar xz --wildcards --no-anchored 'src/policy_engine/bundled-actions/*' --strip-components=1
+    mv -v $(find . -name bundled-actions -type d) /home/agent/bundled-actions
+    chown -R agent:agent /home/agent
+    cd -
+
+    systemctl enable policy-engine.service
+    systemctl start --no-block policy-engine.service
+    bash -xe /usr/local/bin/wait-for-health http://127.0.0.1:8080 &
+
+    echo '{}' | jq --arg hostname "$(hostname)" '{hostname: $hostname}' | curl -sf --json @- "http://172.17.0.1:<REPLACE_WITH_TEST_PORT>/cloud-init-done"
+
+    echo "CLOUD_INIT_RUNCMD_COMPLETE"
