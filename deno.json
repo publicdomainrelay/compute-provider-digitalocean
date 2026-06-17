@@ -7,7 +7,6 @@
     "./lib/compute-provider-local",
     "./lib/compute-provider-digitalocean",
     "./lib/rbac-atproto",
-    "./lib/rbac-git",
     "./lib/oidc-issuer",
     "./lib/hono-factory-compute-provider-local",
     "./lib/hono-factory-compute-provider-digitalocean",
@@ -17,5 +16,9 @@
     "@publicdomainrelay/hono-error-middleware": "../typescript-helpers/lib/hono-error-middleware/mod.ts",
     "@publicdomainrelay/logger": "../typescript-helpers/lib/logger/mod.ts",
     "@std/assert": "jsr:@std/assert@^1.0.19"
+  },
+  "tasks": {
+    "test": "deno test --allow-run --allow-read test/",
+    "test:cli": "deno test --allow-run --allow-read test/cli_smoke_test.ts"
   }
 }

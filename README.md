@@ -111,7 +111,6 @@ lib/abc/compute-provider          ComputeProvider interface, VM, DropletSpec
 lib/compute-provider-local        Docker/QEMU runner, systemctl-shim
 lib/compute-provider-digitalocean DO API provider
 lib/rbac-atproto                  atproto record RBAC (com.fedproxy.rbac)
-lib/rbac-git                      Git HCL RBAC (DO provider)
 lib/oidc-issuer                   OIDC Hono app, OIDCToken, ProvisioningData
 lib/hono-factory-compute-provider-local      DO-compatible droplets API (local backend)
 lib/hono-factory-compute-provider-digitalocean  DO-compatible droplets API (proxy backend)
