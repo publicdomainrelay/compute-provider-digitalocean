@@ -32,6 +32,7 @@
     "test:oidc-rbac-container": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/oidc_rbac_container_integration_test.ts",
     "test:oidc-rbac-vm": "deno test -A test/oidc_rbac_vm_integration_test.ts",
     "test:integration:qemu": "deno test -A test/cloud_init_qemu_integration_test.ts",
+    "build:vm": "deno compile -A --output=hono-qemu-standalone/qemu-standalone hono-qemu-standalone/mod.ts && docker build --pull -f hono-qemu-standalone/Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner:latest hono-qemu-standalone",
     "test:all": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/"
   }
 }

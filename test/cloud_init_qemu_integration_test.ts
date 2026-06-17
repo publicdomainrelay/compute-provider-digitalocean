@@ -145,9 +145,9 @@ Deno.test("[integration] QEMU VM boots cloud-init and posts hostname to callback
     });
     await Deno.writeTextFile(udFile, userData);
 
-    // QEMU cache lives in /root (sudo build writes there). Docker daemon
-    // runs as root so it can read it directly — no copy needed.
-    const qemuCacheDir = "/root/.cache/simple-qemu";
+    // Build writes to ${HOME}/.cache/simple-qemu. Map host cache into
+    // container at /root/.cache/simple-qemu where the binary looks.
+    const qemuCacheDir = `${Deno.env.get("HOME")}/.cache/simple-qemu`;
 
     const containerName = `test-qemu-${crypto.randomUUID().slice(0, 8)}`;
 
