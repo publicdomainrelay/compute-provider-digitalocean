@@ -38,8 +38,12 @@ function canonical(name: string): string {
 }
 
 function isSupervisableService(unitName: string): boolean {
-  
+
   return /\.service$/.test(unitName);
+}
+
+function isPathUnit(unitName: string): boolean {
+  return /\.path$/.test(unitName);
 }
 
 // INI parser (dependency-free; accumulates duplicate keys with "\n")
@@ -90,6 +94,10 @@ interface Unit {
   remainAfterExit: boolean;
   timeoutStopSec: number;
   conditionPathExists: string[];
+  // path unit fields (from [Path] section)
+  pathExists?: string[];
+  pathChanged?: string[];
+  pathUnit?: string; // associated unit to activate when path conditions met
 }
 
 function unitDefaults(name: string): Unit {
@@ -148,6 +156,12 @@ async function parseUnitFile(path: string, name: string): Promise<Unit> {
   }
   if (svc["TimeoutStopSec"]) u.timeoutStopSec = parseInt(svc["TimeoutStopSec"], 10) || 10;
   if (unt["ConditionPathExists"]) u.conditionPathExists = unt["ConditionPathExists"].split("\n");
+
+  const pth = ini["Path"] ?? {};
+  if (pth["PathExists"]) u.pathExists = pth["PathExists"].split("\n");
+  if (pth["PathChanged"]) u.pathChanged = pth["PathChanged"].split("\n");
+  if (pth["Unit"]) u.pathUnit = pth["Unit"];
+
   return u;
 }
 
@@ -288,11 +302,49 @@ async function runExecStartPre(unit: Unit): Promise<boolean> {
   return true;
 }
 
+async function supervisePathUnit(key: string): Promise<void> {
+  while (isWanted(key)) {
+    const unit = await resolveUnit(key);
+    if (!unit) {
+      log(`${key}: unit file not found, dropping`);
+      await unwant(key);
+      return;
+    }
+
+    // default: trigger <name>.service (e.g. setup-wootty.path → setup-wootty.service)
+    const triggerUnit = unit.pathUnit ?? key.replace(/\.path$/, ".service");
+
+    let conditionsMet = true;
+    const paths = unit.pathExists ?? [];
+    for (const p of paths) {
+      const negate = p.startsWith("!");
+      const resolved = negate ? p.slice(1) : p;
+      let exists = false;
+      try { Deno.statSync(resolved); exists = true; } catch { /* missing */ }
+      if (negate && exists) { conditionsMet = false; break; }
+      if (!negate && !exists) { conditionsMet = false; break; }
+    }
+
+    if (conditionsMet) {
+      log(`${key}: path conditions met, triggering ${triggerUnit}`);
+      await want(triggerUnit);
+      await unwant(key); // one-shot trigger
+      return;
+    }
+
+    await new Promise((r) => setTimeout(r, RECONCILE_INTERVAL_MS));
+  }
+}
+
 async function superviseUnit(name: string): Promise<void> {
   const key = canonical(name);
   try {
+    if (isPathUnit(key)) {
+      return await supervisePathUnit(key);
+    }
+
     if (!isSupervisableService(key)) {
-      
+
       return;
     }
 

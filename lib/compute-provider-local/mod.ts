@@ -11,6 +11,7 @@ import type {
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
+import { ProvisioningData } from "@publicdomainrelay/oidc-issuer";
 
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   acceptPathVm?: string;
@@ -553,13 +554,24 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
     const user_data = vm.user_data ?? DEFAULT_USER_DATA;
 
+    // Inject provisioning-token.service + write_files so the container can
+    // exchange its provisioning token for a workload-identity OIDC token.
+    // Bidder calls provision() directly (bypasses HTTP API), so enrichment
+    // must happen here, not only in the hono-factory layer.
+    const provisioningData = await ProvisioningData.create(
+      requesterPlc,
+      user_data,
+      getIssuerUrl(),
+    );
+    const enrichedUserData = provisioningData.userData;
+
     if (containerMode === "container") {
       log("info", "provisioning container", {
         containerName,
         image: containerImage,
       });
 
-      const info = await runContainer(backend, user_data, {
+      const info = await runContainer(backend, enrichedUserData, {
         distro: (ds.image as Distro | undefined) ?? "ubuntu",
         containerName,
         imageTag: containerImage,
@@ -589,7 +601,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     const { ip, sshReady } = await provisionVM(
       vm,
       containerName,
-      user_data,
+      enrichedUserData,
       ds,
       cacheDir,
       vmImage,
