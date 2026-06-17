@@ -1,9 +1,7 @@
 import { Command } from "@cliffy/command";
-import { createLogger } from "@publicdomainrelay/common";
+import { createStructuredLogger, type LogLevel } from "@publicdomainrelay/common";
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
 import { createComputeProviderDigitalOceanFactory } from "@publicdomainrelay/hono-factory-compute-provider-digitalocean";
-
-const log = createLogger("hono-compute-provider");
 
 function homeDir(): string {
   const h = Deno.env.get("HOME");
@@ -30,6 +28,7 @@ async function main() {
     .option("--self-did <did:string>", "This host DID", { default: "did:plc:localhost" })
     .option("--digitalocean-base-url <url:string>", "DO API base URL", { default: "https://droplet-oidc.its1337.com" })
     .option("--do-token <token:string>", "DO API token")
+    .option("--log-level <level:string>", "Minimum log level (debug, info, warn, error)", { default: "info" })
     .env("PORT=<port:number>", "HTTP port")
     .env("COMPUTE_PROVIDER=<mode:string>", "Provider mode")
     .env("CONTAINER_MODE=<mode:boolean>", "Container mode")
@@ -42,6 +41,8 @@ async function main() {
     .env("DIGITALOCEAN_BASE_URL=<url:string>", "DO base URL")
     .env("DO_TOKEN=<token:string>", "DO token")
     .parse(Deno.args);
+
+  const log = createStructuredLogger("hono-compute-provider", options.logLevel as LogLevel);
 
   const port = options.port as number;
   const providerMode = (options.provider as string) === "digitalocean"

@@ -2,18 +2,10 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
 import * as jose from "jose";
+import type { Logger } from "@publicdomainrelay/common";
+import { noopLogger } from "@publicdomainrelay/common";
 
-export type Logger = (
-  level: "info" | "warn" | "error" | "debug",
-  msg: string,
-  extra?: Record<string, unknown>,
-) => void;
-
-const noopLog: Logger = () => {};
-
-function shortLog(level: string, msg: string, data?: Record<string, unknown>) {
-  console.log(JSON.stringify({ level, msg, ts: new Date().toISOString(), ...data }));
-}
+export type { Logger };
 
 class UnauthorizedException extends Error {
   constructor(msg: string) { super(msg); this.name = "UnauthorizedException"; }
@@ -497,7 +489,7 @@ export interface OidcIssuer {
 
 export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
   const { getIssuerUrl, getDroplet } = opts;
-  const log = opts.log ?? noopLog;
+  const log = opts.log ?? noopLogger;
 
   configureOidc({ getIssuerUrl });
 
