@@ -9,14 +9,14 @@ import type {
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider";
-import { configureRbac } from "@publicdomainrelay/rbac-git";
+import { configureRbac, type RbacContext } from "@publicdomainrelay/rbac-atproto";
 
 export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
   getAgentDid: () => string;
+  getIssuerUrl: () => string;
   acceptPathVm: string;
   digitaloceanBaseUrl: string;
   doToken: string;
-  rbacRepoRoot?: string;
   createRecord?: (
     collection: string,
     record: Record<string, unknown>,
@@ -35,6 +35,7 @@ const DEFAULT_ACCEPT_PATH_VM =
 export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOceanCtx) {
   const {
     getAgentDid,
+    getIssuerUrl,
     log,
     acceptPathVm = DEFAULT_ACCEPT_PATH_VM,
     digitaloceanBaseUrl = DEFAULT_DIGITALOCEAN_BASE_URL,
@@ -82,7 +83,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
       return createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
         $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
         accept_path: acceptPathVm,
-        issuer_uri: digitaloceanBaseUrl,
+        issuer_uri: getIssuerUrl(),
         to_issue: "exchange-custom-droplet-oidc-poc",
         actx: doctx.teamUuid,
         actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
@@ -121,27 +122,16 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     const doctx = await makeDoctx();
 
     let rbacRef: StrongRef | undefined;
-    if (ctx.rbacRepoRoot) {
-      rbacRef = await configureRbac(vm, requesterDid, {
-        teamUuid: doctx.teamUuid,
-        rbacRepoRoot: ctx.rbacRepoRoot,
-        digitaloceanBaseUrl,
-        doToken,
+    if (createRecord) {
+      const rbacCtx: RbacContext = {
+        getAgentDid,
+        getIssuerUrl,
+        createRecord,
+        deleteRecord,
+        parseAtUri,
         log: (level, msg, meta) => log(level, msg, meta),
-      });
-    } else if (createRecord) {
-      const agentDidPlc = getAgentDid().split(":").slice(-1)[0];
-      const slug = `${doctx.teamUuid}-${requesterPlc}-${vm.role}`;
-      rbacRef = await createRecord(RBAC_NSID, {
-        $type: RBAC_NSID,
-        protects: {
-          [`ex-${slug}`]: {
-            service: digitaloceanBaseUrl,
-            scope: "droplets.wid",
-          },
-        },
-        createdAt: new Date().toISOString(),
-      });
+      };
+      rbacRef = await configureRbac(vm, requesterDid, rbacCtx);
     }
 
     const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets`, {

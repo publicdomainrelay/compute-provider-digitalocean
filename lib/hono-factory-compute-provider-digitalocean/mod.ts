@@ -2,8 +2,7 @@ import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
 import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/common";
 import type { LoggerInterface } from "@publicdomainrelay/common";
-import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider";
-import { configureRbac, type GitRbacContext } from "@publicdomainrelay/rbac-git";
+import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
 
 export interface DropletCreateRequest {
   name: string;
@@ -40,10 +39,13 @@ export interface ComputeProviderDigitalOceanFactoryOptions {
   digitaloceanBaseUrl: string;
   doToken: string;
   log: LoggerInterface;
-  gitRbac?: {
-    rbacRepoRoot: string;
-    digitaloceanBaseUrl: string;
-    doToken: string;
+  getDroplet?: (id: string) => Record<string, unknown> | undefined;
+  rbac?: {
+    getAgentDid: () => string;
+    createRecord: (collection: string, record: Record<string, unknown>) => Promise<{ $type: string; uri: string; cid: string }>;
+    deleteRecord?: (collection: string, rkey: string) => Promise<void>;
+    parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
+    log?: (level: string, msg: string, meta?: Record<string, unknown>) => void;
   };
 }
 
@@ -67,13 +69,7 @@ export interface ComputeProviderDigitalOceanFactoryState {
 export function createComputeProviderDigitalOceanFactory(
   opts: ComputeProviderDigitalOceanFactoryOptions,
 ): ComputeProviderDigitalOceanFactory {
-  const {
-    operatorHandle: _operatorHandle,
-    issuerUrl: _issuerUrl,
-    log,
-    digitaloceanBaseUrl,
-    doToken,
-  } = opts;
+  const { operatorHandle: _operatorHandle, issuerUrl: _issuerUrl, log, digitaloceanBaseUrl, doToken } = opts;
   const getIssuerUrl = (): string =>
     typeof _issuerUrl === "function" ? _issuerUrl() : _issuerUrl;
   const getOperatorHandle = (): string =>
@@ -87,6 +83,26 @@ export function createComputeProviderDigitalOceanFactory(
     return m;
   }
 
+  function getDropletById(id: string): Record<string, unknown> | undefined {
+    if (opts.getDroplet) return opts.getDroplet(id);
+    for (const m of dropletsByActx.values()) {
+      const d = m.get(Number(id));
+      if (d) return d as unknown as Record<string, unknown>;
+    }
+    return undefined;
+  }
+
+  const oidcIssuer = createOidcIssuer({
+    getIssuerUrl,
+    getDroplet: getDropletById,
+    log: (level, msg, extra) => {
+      if (level === "info") log.info(msg, extra);
+      else if (level === "warn") log.warn(msg, extra);
+      else if (level === "error") log.error(msg, extra);
+      else log.info(msg, extra);
+    },
+  });
+
   const factory = createFactory<ComputeProviderDigitalOceanEnv>({
     initApp: (app) => {
       app.use("*", cors());
@@ -95,6 +111,8 @@ export function createComputeProviderDigitalOceanFactory(
         log.info("request", { method: c.req.method, path: c.req.path });
         await next();
       });
+
+      app.route("/", oidcIssuer.app);
 
       app.use("/v2/account", async (c, next) => {
         try {
@@ -127,11 +145,11 @@ export function createComputeProviderDigitalOceanFactory(
       });
 
       app.get("/v2/account", async (c) => {
-        const actx = c.get("actx");
         const res = await fetch(`${digitaloceanBaseUrl}/v2/account`, {
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${actx}`,
+            "Authorization": `Bearer ${doToken}`,
+            [ON_BEHALF_OF_HEADER]: c.get("actx"),
           },
         });
         const json = await res.json();
@@ -154,23 +172,9 @@ export function createComputeProviderDigitalOceanFactory(
           const actx = c.get("actx");
           log.info("droplets.create -> DO proxy", { name: body.name, actx });
 
-          if (opts.gitRbac) {
-            await configureRbac(
-              { role: "provision" },
-              actx,
-              {
-                teamUuid: actx,
-                rbacRepoRoot: opts.gitRbac.rbacRepoRoot,
-                digitaloceanBaseUrl: opts.gitRbac.digitaloceanBaseUrl,
-                doToken: opts.gitRbac.doToken,
-                log: (level, msg, meta) => {
-                  if (level === "info") log.info(msg, meta);
-                  else if (level === "error") log.error(msg, meta);
-                  else log.info(msg, meta);
-                },
-              },
-            ).catch((err) => log.warn("rbac git push failed, continuing", { error: String(err) }));
-          }
+          const provisioningData = await ProvisioningData.create(actx, body.user_data ?? null, getIssuerUrl());
+          body.user_data = provisioningData.userData;
+          provisioningData.associateWithDroplet(body.name);
 
           const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets`, {
             method: "POST",
