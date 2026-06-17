@@ -117,7 +117,8 @@ runcmd:
 
     # curl -sfL -o /usr/local/bin/policy_engine 'https://bin--johnandersen777-bsky-social.fedproxy.com/policy-engine'
     # chmod 755 /usr/local/bin/policy_engine
-    curl -sfL 'https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_amd64.tar.gz' | tar -xvz -C /usr/local/bin
+    ARCH=$(uname -m); case "$ARCH" in x86_64) ARCH=amd64;; aarch64) ARCH=arm64;; esac
+    curl -sfL "https://github.com/publicdomainrelay/sshai/releases/download/latest/policy_engine_0.0.1-next_linux_${ARCH}.tar.gz" | tar -xvz -C /usr/local/bin
 
     mkdir -pv /home/agent/
     cd $(mktemp -d)

@@ -1,18 +1,16 @@
 import { assertEquals } from "@std/assert";
-import { runContainer } from "@publicdomainrelay/compute-provider-local";
+import { runContainer, ensureBackendRunning, rmContainer } from "@publicdomainrelay/compute-provider-local";
 
 const USER_DATA_PATH = new URL("./cloud-init.yaml", import.meta.url).pathname;
 const CALLBACK_TIMEOUT_MS = 120_000;
 
-async function dockerRm(containerName: string): Promise<void> {
-  await new Deno.Command("docker", {
-    args: ["rm", "-f", containerName],
-    stdout: "null",
-    stderr: "null",
-  }).output().catch(() => {});
-}
-
 Deno.test("[integration] cloud-init posts hostname to test callback server", async () => {
+  const backendReady = await ensureBackendRunning();
+  if (!backendReady) {
+    console.log("[test] SKIP: container backend not available");
+    return;
+  }
+
   let resolveCallback: (v: { hostname: string }) => void;
   const received = new Promise<{ hostname: string }>((resolve) => {
     resolveCallback = resolve;
@@ -75,7 +73,7 @@ Deno.test("[integration] cloud-init posts hostname to test callback server", asy
         `[test] cloud-init callback received: hostname=${result.hostname}`,
       );
     } finally {
-      await dockerRm(info.containerName);
+      await rmContainer(info.containerName).catch(() => {});
     }
   } finally {
     ac.abort();

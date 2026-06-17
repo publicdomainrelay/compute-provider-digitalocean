@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
 import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider-abc";
-import { spawnVM, defaultCacheDir } from "@publicdomainrelay/compute-provider-local";
+import { spawnVM, defaultCacheDir, killContainer, rmContainer } from "@publicdomainrelay/compute-provider-local";
 import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
 
 export interface DropletCreateRequest {
@@ -237,8 +237,8 @@ export function createComputeProviderLocalFactory(
         const dm = getDropletsMap(actx);
         if (!dm.has(id)) return c.json({ id: "not_found", message: "Droplet not found" }, 404);
         dm.delete(id);
-        await new Deno.Command("docker", { args: ["kill", `droplet-${id}`] }).output().catch(() => {});
-        await new Deno.Command("docker", { args: ["rm", "-f", `droplet-${id}`] }).output().catch(() => {});
+        await killContainer(`droplet-${id}`).catch(() => {});
+        await rmContainer(`droplet-${id}`).catch(() => {});
         return new Response(null, { status: 204 });
       });
     },
@@ -252,11 +252,7 @@ export function createComputeProviderLocalFactory(
       if (ids.length === 0) return;
       log.info("shutdown: killing droplets", { ids });
       await Promise.all(
-        ids.map((id) =>
-          new Deno.Command("docker", { args: ["rm", "-f", `droplet-${id}`] })
-            .output()
-            .catch(() => {})
-        ),
+        ids.map((id) => rmContainer(`droplet-${id}`).catch(() => {})),
       );
     },
 

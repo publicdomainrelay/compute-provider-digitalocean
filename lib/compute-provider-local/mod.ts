@@ -88,7 +88,31 @@ function shortUuid(): string {
   return crypto.randomUUID().slice(0, 8);
 }
 
-async function dockerRun(
+function containerBin(): string {
+  return Deno.build.os === "darwin" ? "container" : "docker";
+}
+
+const IS_CONTAINER_BACKEND = containerBin() === "container";
+
+async function containerCli(
+  args: string[],
+  opts?: { inherit?: boolean },
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const cmd = new Deno.Command(containerBin(), {
+    args,
+    stdout: opts?.inherit ? "inherit" : "piped",
+    stderr: opts?.inherit ? "inherit" : "piped",
+  });
+  const out = await cmd.output();
+  return {
+    code: out.code,
+    stdout: opts?.inherit ? "" : new TextDecoder().decode(out.stdout).trim(),
+    stderr: opts?.inherit ? "" : new TextDecoder().decode(out.stderr).trim(),
+  };
+}
+
+/** docker-only runner for VM path operations that need --privileged, --device, etc. */
+async function dockerCli(
   args: string[],
   opts?: { inherit?: boolean },
 ): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -105,14 +129,81 @@ async function dockerRun(
   };
 }
 
-export async function dockerInspectIp(containerName: string): Promise<string> {
-  const { code, stdout } = await dockerRun([
+export async function containerInspectIp(containerName: string): Promise<string> {
+  if (IS_CONTAINER_BACKEND) {
+    const { code, stdout } = await containerCli(["inspect", containerName]);
+    if (code !== 0) throw new Error(`container inspect failed for ${containerName}`);
+    const info = JSON.parse(stdout);
+    const addr = info?.[0]?.status?.networks?.[0]?.ipv4Address;
+    if (!addr) throw new Error(`no IP found in container inspect for ${containerName}`);
+    return addr.split("/")[0]; // strip CIDR suffix
+  }
+  const { code, stdout } = await containerCli([
     "inspect", "--format",
     "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
     containerName,
   ]);
   if (code !== 0) throw new Error(`docker inspect failed for ${containerName}`);
   return stdout;
+}
+
+export async function killContainer(name: string): Promise<void> {
+  await containerCli(["kill", name]);
+}
+
+export async function rmContainer(name: string): Promise<void> {
+  if (IS_CONTAINER_BACKEND) {
+    await containerCli(["delete", "--force", name]);
+  } else {
+    await containerCli(["rm", "-f", name]);
+  }
+}
+
+export async function containerExec(
+  containerName: string,
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return containerCli(["exec", containerName, ...args]);
+}
+
+export async function isBackendRunning(): Promise<boolean> {
+  if (IS_CONTAINER_BACKEND) {
+    const { code, stdout } = await containerCli(["system", "status"]);
+    if (code !== 0) return false;
+    return stdout.includes("running") || stdout.includes("apiserver");
+  }
+  const { code } = await containerCli(["info"]);
+  return code === 0;
+}
+
+export async function ensureBackendRunning(): Promise<boolean> {
+  if (await isBackendRunning()) return true;
+
+  if (IS_CONTAINER_BACKEND) {
+    console.log("==> container system not running — starting...");
+    const { code, stderr } = await new Deno.Command("container", {
+      args: ["system", "start", "--enable-kernel-install", "--timeout", "60"],
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output();
+    if (code !== 0) {
+      console.error(`container system start failed (exit ${code}): ${new TextDecoder().decode(stderr)}`);
+      return false;
+    }
+    // give apiserver a moment
+    for (let i = 0; i < 20; i++) {
+      if (await isBackendRunning()) {
+        console.log("==> container system ready");
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    console.error("container system start timed out waiting for apiserver");
+    return false;
+  }
+
+  console.error("docker not running — start docker daemon first");
+  return false;
 }
 
 export async function pollSsh(
@@ -134,7 +225,11 @@ export async function pollSsh(
 }
 
 async function imageExists(tag: string): Promise<boolean> {
-  const { code, stdout } = await dockerRun(["images", "-q", tag]);
+  if (IS_CONTAINER_BACKEND) {
+    const { code } = await containerCli(["image", "inspect", tag]);
+    return code === 0;
+  }
+  const { code, stdout } = await containerCli(["images", "-q", tag]);
   return code === 0 && stdout.length > 0;
 }
 
@@ -143,8 +238,13 @@ async function pullImage(
   log: Logger,
 ): Promise<void> {
   log("info", "pulling image", { image });
-  const { code, stderr } = await dockerRun(["pull", image], { inherit: true });
-  if (code !== 0) throw new Error(`docker pull failed for ${image}: ${stderr}`);
+  if (IS_CONTAINER_BACKEND) {
+    const { code, stderr } = await containerCli(["image", "pull", image], { inherit: true });
+    if (code !== 0) throw new Error(`container image pull failed for ${image}: ${stderr}`);
+  } else {
+    const { code, stderr } = await containerCli(["pull", image], { inherit: true });
+    if (code !== 0) throw new Error(`docker pull failed for ${image}: ${stderr}`);
+  }
 }
 
 function imageTag(distro: Distro): string {
@@ -213,7 +313,7 @@ export async function buildContainerImage(
       generateDockerfile(distro),
     );
 
-    const { code } = await new Deno.Command("docker", {
+    const { code } = await new Deno.Command(containerBin(), {
       args: [
         "build",
         "--pull",
@@ -226,7 +326,7 @@ export async function buildContainerImage(
     }).output();
 
     if (code !== 0) {
-      throw new Error(`docker build failed for ${tag}`);
+      throw new Error(`container build failed for ${tag}`);
     }
 
     console.log(`==> Built container image: ${tag}`);
@@ -287,30 +387,35 @@ export async function runContainer(
 
   const systemctlShimTag = await copySystemctlShim(distro, cacheDir);
 
-  await dockerRun(["rm", "-f", containerName]).catch(() => {});
+  await rmContainer(containerName).catch(() => {});
 
-  const { code, stderr } = await dockerRun([
+  const runArgs: string[] = [
     "run", "-d",
     "--name", containerName,
     "--memory", memory,
-    "--memory-swap", memory,
+  ];
+  // --memory-swap is docker-only; container backend sets memory as VM limit
+  if (!IS_CONTAINER_BACKEND) runArgs.push("--memory-swap", memory);
+  runArgs.push(
     "-v", `${udFile}:/tmp/user-data:ro`,
     "-v", `${epFile}:/entrypoint.sh:ro`,
     "-v", `${systemctlShimTag}:/usr/local/bin/systemctl-shim.ts:ro`,
     "-e", "USER_DATA_FILE=/tmp/user-data",
     tag,
-  ]);
+  );
+
+  const { code, stderr } = await containerCli(runArgs);
 
   if (code !== 0) {
     await Deno.remove(udFile).catch(() => {});
     await Deno.remove(epFile).catch(() => {});
     throw new Error(
-      `docker run failed for ${containerName} (exit ${code}): ${stderr}`,
+      `container run failed for ${containerName} (exit ${code}): ${stderr}`,
     );
   }
 
   await new Promise((r) => setTimeout(r, 1_000));
-  const ip = await dockerInspectIp(containerName);
+  const ip = await containerInspectIp(containerName);
   console.log(`==> Container IP: ${ip}`);
 
   if (opts.onIp) await opts.onIp(ip, containerName);
@@ -350,9 +455,9 @@ async function provisionVM(
   const udFile = `${cacheDir}/ud-${containerName}.yaml`;
   await Deno.writeTextFile(udFile, user_data);
 
-  await dockerRun(["rm", "-f", containerName]).catch(() => {});
+  await dockerCli(["rm", "-f", containerName]).catch(() => {});
 
-  const { code, stderr } = await dockerRun([
+  const { code, stderr } = await dockerCli([
     "run", "-d",
     "--name", containerName,
     "--privileged",
@@ -374,7 +479,7 @@ async function provisionVM(
 
   let ip = "0.0.0.0";
   try {
-    ip = await dockerInspectIp(containerName);
+    ip = await containerInspectIp(containerName);
     log("info", "VM container IP", { containerName, ip });
   } catch {
     log("warn", "could not get VM container IP", { containerName });
@@ -430,7 +535,7 @@ export async function spawnVM(opts: SpawnVMOpts): Promise<void> {
   const udFile = await Deno.makeTempFile({ dir: cacheDir, prefix: "userdata-", suffix: ".yaml" });
   await Deno.writeTextFile(udFile, userData);
 
-  await dockerRun(["rm", "-f", containerName]).catch(() => {});
+  await dockerCli(["rm", "-f", containerName]).catch(() => {});
 
   const distro = (droplet["image"] as Record<string, string>)?.slug ?? "ubuntu";
 
@@ -460,7 +565,7 @@ export async function spawnVM(opts: SpawnVMOpts): Promise<void> {
   (async () => {
     try {
       await new Promise((r) => setTimeout(r, 2_000));
-      const ip = await dockerInspectIp(containerName);
+      const ip = await containerInspectIp(containerName);
       log.info("container IP assigned", { droplet_id: droplet["id"], ip });
       const up = await pollSsh(ip);
       if (up) {
@@ -640,8 +745,8 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
   async function destroyLocal(id: string | number): Promise<void> {
     const name = String(id);
     log("info", "destroying container", { containerName: name });
-    await dockerRun(["kill", name]).catch(() => {});
-    await dockerRun(["rm", "-f", name]).catch(() => {});
+    await killContainer(name).catch(() => {});
+    await rmContainer(name).catch(() => {});
     droplets.delete(name);
   }
 

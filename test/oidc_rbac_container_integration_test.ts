@@ -4,7 +4,7 @@ import {
   ProvisioningData,
   OIDCToken,
 } from "@publicdomainrelay/oidc-issuer";
-import { runContainer } from "@publicdomainrelay/compute-provider-local";
+import { runContainer, ensureBackendRunning, rmContainer, containerExec } from "@publicdomainrelay/compute-provider-local";
 import { getRBACRecord } from "@publicdomainrelay/rbac-atproto";
 import { createPlcDirectory } from "./plc_directory.ts";
 import { Hono } from "hono";
@@ -21,21 +21,17 @@ function allocatePort(): number {
   return p;
 }
 
-async function dockerExec(containerName: string, args: string[]): Promise<string> {
-  const cmd = new Deno.Command("docker", {
-    args: ["exec", containerName, ...args],
-    stdout: "piped", stderr: "null",
-  });
-  const { code, stdout } = await cmd.output();
-  if (code !== 0) throw new Error(`docker exec failed: ${args.join(" ")}`);
-  return new TextDecoder().decode(stdout).trim();
+async function execInContainer(containerName: string, args: string[]): Promise<string> {
+  const { code, stdout } = await containerExec(containerName, args);
+  if (code !== 0) throw new Error(`container exec failed: ${args.join(" ")}`);
+  return stdout;
 }
 
 async function pollForToken(containerName: string): Promise<string> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      const token = await dockerExec(containerName, ["cat", TOKEN_PATH]);
+      const token = await execInContainer(containerName, ["cat", TOKEN_PATH]);
       if (token && token.length > 10) return token;
     } catch {/* not ready */}
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
@@ -43,14 +39,17 @@ async function pollForToken(containerName: string): Promise<string> {
   throw new Error(`Token not found at ${TOKEN_PATH} within ${POLL_TIMEOUT_MS}ms`);
 }
 
-async function dockerRm(containerName: string): Promise<void> {
-  await new Deno.Command("docker", {
-    args: ["rm", "-f", containerName],
-    stdout: "null", stderr: "null",
-  }).output().catch(() => {});
+async function cleanupContainer(containerName: string): Promise<void> {
+  await rmContainer(containerName).catch(() => {});
 }
 
 Deno.test("[integration] Container receives workload token + RBAC issue", async () => {
+  const backendReady = await ensureBackendRunning();
+  if (!backendReady) {
+    console.log("[test] SKIP: container backend not available");
+    return;
+  }
+
   // Infrastructure ports. Compute provider binds 0.0.0.0 so containers reach it
   // at 172.17.0.1 (Docker bridge). All other infra on 127.0.0.1.
   const plcPort = allocatePort();
@@ -193,6 +192,6 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
     issuerAc.abort();
     plcAc.abort();
     pdsAc.abort();
-    if (containerName) await dockerRm(containerName);
+    if (containerName) await cleanupContainer(containerName);
   }
 });

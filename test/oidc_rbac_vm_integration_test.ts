@@ -4,7 +4,7 @@ import {
   ProvisioningData,
   OIDCToken,
 } from "@publicdomainrelay/oidc-issuer";
-import { dockerInspectIp, pollSsh } from "@publicdomainrelay/compute-provider-local";
+import { containerInspectIp, pollSsh } from "@publicdomainrelay/compute-provider-local";
 import { getRBACRecord } from "@publicdomainrelay/rbac-atproto";
 import { createPlcDirectory } from "./plc_directory.ts";
 import { Hono } from "hono";
@@ -211,7 +211,7 @@ runcmd:
     if (runResult.code !== 0) throw new Error(`docker run failed: ${new TextDecoder().decode(runResult.stderr)}`);
 
     await new Promise((r) => setTimeout(r, 3_000));
-    const ip = await dockerInspectIp(containerName);
+    const ip = await containerInspectIp(containerName);
     console.log(`[test] VM IP: ${ip}`);
 
     const sshReady = await pollSsh(ip, 22, SSH_TIMEOUT_MS);
