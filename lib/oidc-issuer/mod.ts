@@ -2,8 +2,8 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
 import * as jose from "jose";
-import type { Logger } from "@publicdomainrelay/common";
-import { noopLogger } from "@publicdomainrelay/common";
+import type { Logger } from "@publicdomainrelay/logger";
+import { noopLogger } from "@publicdomainrelay/logger";
 
 export type { Logger };
 

@@ -1,5 +1,5 @@
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import type { Logger, LoggerInterface } from "@publicdomainrelay/common";
+import type { Logger, LoggerInterface } from "@publicdomainrelay/logger";
 import type {
   ComputeProvider,
   ComputeProviderCtx,

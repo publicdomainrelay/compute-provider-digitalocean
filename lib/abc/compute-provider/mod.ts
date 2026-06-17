@@ -1,4 +1,4 @@
-import type { Logger } from "@publicdomainrelay/common";
+import type { Logger } from "@publicdomainrelay/logger";
 
 export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
 

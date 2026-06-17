@@ -4,7 +4,7 @@
   "license": "Unlicense",
   "exports": "./mod.ts",
   "imports": {
-    "@publicdomainrelay/common": "jsr:@publicdomainrelay/common@^0",
+    "@publicdomainrelay/logger": "jsr:@publicdomainrelay/logger@^0.2",
     "hono": "npm:hono@^4",
     "jose": "npm:jose@^5",
     "yaml": "npm:yaml@^2.7.0"

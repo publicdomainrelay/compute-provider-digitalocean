@@ -1,6 +1,6 @@
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/common";
-import type { Logger } from "@publicdomainrelay/common";
+import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
+import type { Logger } from "@publicdomainrelay/logger";
 import type {
   ComputeProvider,
   ComputeProviderCtx,

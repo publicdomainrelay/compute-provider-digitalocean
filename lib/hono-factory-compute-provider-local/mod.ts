@@ -1,6 +1,6 @@
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
-import type { LoggerInterface } from "@publicdomainrelay/common";
+import type { LoggerInterface } from "@publicdomainrelay/logger";
 import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider";
 import { spawnVM } from "@publicdomainrelay/compute-provider-local";
 import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";

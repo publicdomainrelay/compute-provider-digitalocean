@@ -1,7 +1,7 @@
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
-import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/common";
-import type { LoggerInterface } from "@publicdomainrelay/common";
+import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
+import type { LoggerInterface } from "@publicdomainrelay/logger";
 import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
 
 export interface DropletCreateRequest {

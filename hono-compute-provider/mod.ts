@@ -1,5 +1,5 @@
 import { Command } from "@cliffy/command";
-import { createStructuredLogger, type LogLevel } from "@publicdomainrelay/common";
+import { createStructuredLogger, type LogLevel } from "@publicdomainrelay/logger";
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
 import { createComputeProviderDigitalOceanFactory } from "@publicdomainrelay/hono-factory-compute-provider-digitalocean";
 

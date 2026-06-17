@@ -1,7 +1,7 @@
 {
   "nodeModulesDir": "auto",
   "workspace": [
-    "./lib/common",
+    "./lib/common/compute-provider-common",
     "./lib/abc/compute-provider",
     "./lib/compute-provider-local",
     "./lib/compute-provider-digitalocean",
@@ -13,6 +13,7 @@
     "./hono-compute-provider"
   ],
   "imports": {
+    "@publicdomainrelay/logger": "../typescript-helpers/lib/logger/mod.ts",
     "@std/assert": "jsr:@std/assert@^1.0.19"
   }
 }
