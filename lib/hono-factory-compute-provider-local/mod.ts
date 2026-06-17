@@ -3,7 +3,10 @@ import { cors } from "hono/cors";
 import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
 import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider-abc";
-import { spawnVM, defaultCacheDir, killContainer, rmContainer } from "@publicdomainrelay/compute-provider-local";
+import { spawnVM, defaultCacheDir } from "@publicdomainrelay/compute-provider-local";
+import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
+import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
+import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
 
 export interface DropletCreateRequest {
@@ -42,6 +45,7 @@ export interface ComputeProviderLocalFactoryOptions {
   containerMode: boolean;
   containerImage: string;
   cacheDir?: string;
+  containerBackend?: ContainerBackend;
   log: LoggerInterface;
   getDroplet?: (id: string) => Record<string, unknown> | undefined;
   rbac?: {
@@ -95,6 +99,8 @@ export function createComputeProviderLocalFactory(
   opts: ComputeProviderLocalFactoryOptions,
 ): ComputeProviderLocalFactory {
   const { operatorHandle: _operatorHandle, issuerUrl: _issuerUrl, log } = opts;
+  const backend: ContainerBackend = opts.containerBackend ??
+    (Deno.build.os === "darwin" ? createContainerBackend() : createDockerBackend());
   const getIssuerUrl = (): string =>
     typeof _issuerUrl === "function" ? _issuerUrl() : _issuerUrl;
   const getOperatorHandle = (): string =>
@@ -210,6 +216,7 @@ export function createComputeProviderLocalFactory(
             containerImage: opts.containerImage,
             cacheDir: opts.cacheDir ?? defaultCacheDir(),
             log,
+            backend,
           });
           return c.json({ droplet }, 202);
         } catch (err) {
@@ -237,8 +244,8 @@ export function createComputeProviderLocalFactory(
         const dm = getDropletsMap(actx);
         if (!dm.has(id)) return c.json({ id: "not_found", message: "Droplet not found" }, 404);
         dm.delete(id);
-        await killContainer(`droplet-${id}`).catch(() => {});
-        await rmContainer(`droplet-${id}`).catch(() => {});
+        await backend.kill(`droplet-${id}`).catch(() => {});
+        await backend.rm(`droplet-${id}`).catch(() => {});
         return new Response(null, { status: 204 });
       });
     },
@@ -252,7 +259,7 @@ export function createComputeProviderLocalFactory(
       if (ids.length === 0) return;
       log.info("shutdown: killing droplets", { ids });
       await Promise.all(
-        ids.map((id) => rmContainer(`droplet-${id}`).catch(() => {})),
+        ids.map((id) => backend.rm(`droplet-${id}`).catch(() => {})),
       );
     },
 
@@ -288,6 +295,7 @@ export function createComputeProviderLocalFactory(
         containerImage: opts.containerImage,
         cacheDir: opts.cacheDir ?? defaultCacheDir(),
         log,
+        backend,
       });
 
       return {

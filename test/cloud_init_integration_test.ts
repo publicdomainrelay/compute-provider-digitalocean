@@ -1,11 +1,14 @@
 import { assertEquals } from "@std/assert";
-import { runContainer, ensureBackendRunning, rmContainer } from "@publicdomainrelay/compute-provider-local";
+import { runContainer } from "@publicdomainrelay/compute-provider-local";
+import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
+import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 
 const USER_DATA_PATH = new URL("./cloud-init.yaml", import.meta.url).pathname;
 const CALLBACK_TIMEOUT_MS = 120_000;
 
 Deno.test("[integration] cloud-init posts hostname to test callback server", async () => {
-  const backendReady = await ensureBackendRunning();
+  const backend = Deno.build.os === "darwin" ? createContainerBackend() : createDockerBackend();
+  const backendReady = await backend.ensureRunning();
   if (!backendReady) {
     console.log("[test] SKIP: container backend not available");
     return;
@@ -51,7 +54,7 @@ Deno.test("[integration] cloud-init posts hostname to test callback server", asy
 
     const containerName = `test-ci-${crypto.randomUUID().slice(0, 8)}`;
 
-    const info = await runContainer(userData, {
+    const info = await runContainer(backend, userData, {
       distro: "ubuntu",
       containerName,
     });
@@ -73,7 +76,7 @@ Deno.test("[integration] cloud-init posts hostname to test callback server", asy
         `[test] cloud-init callback received: hostname=${result.hostname}`,
       );
     } finally {
-      await rmContainer(info.containerName).catch(() => {});
+      await backend.rm(info.containerName).catch(() => {});
     }
   } finally {
     ac.abort();

@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
-import { containerInspectIp, pollSsh } from "@publicdomainrelay/compute-provider-local";
+import { pollSsh } from "@publicdomainrelay/compute-provider-local";
+import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 
 const USER_DATA_PATH = new URL("./cloud-init.yaml", import.meta.url).pathname;
 const VM_IMAGE = "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner:latest";
@@ -176,7 +177,8 @@ Deno.test("[integration] QEMU VM boots cloud-init and posts hostname to callback
     try {
       await new Promise((r) => setTimeout(r, 2_000));
 
-      const ip = await containerInspectIp(containerName);
+      const docker = createDockerBackend();
+      const ip = await docker.inspectIp(containerName);
       console.log(`[test] QEMU container IP: ${ip}`);
 
       console.log(`[test] waiting for SSH on ${ip}:22 (timeout ${SSH_TIMEOUT_MS}ms)...`);

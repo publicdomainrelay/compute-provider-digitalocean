@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/container-backend-abc",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/container-backend-common": "jsr:@publicdomainrelay/container-backend-common@^0"
+  }
+}

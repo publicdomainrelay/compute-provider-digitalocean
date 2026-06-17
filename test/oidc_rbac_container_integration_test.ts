@@ -4,7 +4,10 @@ import {
   ProvisioningData,
   OIDCToken,
 } from "@publicdomainrelay/oidc-issuer";
-import { runContainer, ensureBackendRunning, rmContainer, containerExec } from "@publicdomainrelay/compute-provider-local";
+import { runContainer } from "@publicdomainrelay/compute-provider-local";
+import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
+import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
+import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { getRBACRecord } from "@publicdomainrelay/rbac-atproto";
 import { createPlcDirectory } from "./plc_directory.ts";
 import { Hono } from "hono";
@@ -21,17 +24,24 @@ function allocatePort(): number {
   return p;
 }
 
-async function execInContainer(containerName: string, args: string[]): Promise<string> {
-  const { code, stdout } = await containerExec(containerName, args);
+async function execInContainer(
+  backend: ContainerBackend,
+  containerName: string,
+  args: string[],
+): Promise<string> {
+  const { code, stdout } = await backend.exec(containerName, args);
   if (code !== 0) throw new Error(`container exec failed: ${args.join(" ")}`);
   return stdout;
 }
 
-async function pollForToken(containerName: string): Promise<string> {
+async function pollForToken(
+  backend: ContainerBackend,
+  containerName: string,
+): Promise<string> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      const token = await execInContainer(containerName, ["cat", TOKEN_PATH]);
+      const token = await execInContainer(backend, containerName, ["cat", TOKEN_PATH]);
       if (token && token.length > 10) return token;
     } catch {/* not ready */}
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
@@ -39,12 +49,15 @@ async function pollForToken(containerName: string): Promise<string> {
   throw new Error(`Token not found at ${TOKEN_PATH} within ${POLL_TIMEOUT_MS}ms`);
 }
 
-async function cleanupContainer(containerName: string): Promise<void> {
-  await rmContainer(containerName).catch(() => {});
+async function cleanupContainer(backend: ContainerBackend, containerName: string): Promise<void> {
+  await backend.rm(containerName).catch(() => {});
 }
 
 Deno.test("[integration] Container receives workload token + RBAC issue", async () => {
-  const backendReady = await ensureBackendRunning();
+  const backend: ContainerBackend = Deno.build.os === "darwin"
+    ? createContainerBackend()
+    : createDockerBackend();
+  const backendReady = await backend.ensureRunning();
   if (!backendReady) {
     console.log("[test] SKIP: container backend not available");
     return;
@@ -154,7 +167,7 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
 
     // Launch container — onIp updates droplet BEFORE cloud-init runs prove
     containerName = `test-rbac-${crypto.randomUUID().slice(0, 8)}`;
-    const info = await runContainer(pd.userData, {
+    const info = await runContainer(backend, pd.userData, {
       distro: "ubuntu",
       containerName,
       onIp(ip, name) {
@@ -164,7 +177,7 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
     });
 
     // Poll for workload token
-    const workloadToken = await pollForToken(info.containerName);
+    const workloadToken = await pollForToken(backend, info.containerName);
     const validatedWl = await OIDCToken.validate(workloadToken);
     assertEquals(validatedWl.actx, actxUuid);
 
@@ -192,6 +205,6 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
     issuerAc.abort();
     plcAc.abort();
     pdsAc.abort();
-    if (containerName) await cleanupContainer(containerName);
+    if (containerName) await cleanupContainer(backend, containerName);
   }
 });

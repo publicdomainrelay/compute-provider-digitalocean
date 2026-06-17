@@ -1,9 +1,13 @@
 {
   "nodeModulesDir": "auto",
   "workspace": [
+    "./lib/common/container-backend",
     "./lib/common/compute-provider-common",
+    "./lib/abc/container-backend",
     "./lib/abc/compute-provider",
     "./lib/abc/oidc-issuer",
+    "./lib/container-backend-docker",
+    "./lib/container-backend-container",
     "./lib/compute-provider-local",
     "./lib/compute-provider-digitalocean",
     "./lib/rbac-atproto",
@@ -15,6 +19,10 @@
     "./hono-qemu-standalone"
   ],
   "imports": {
+    "@publicdomainrelay/container-backend-common": "./lib/common/container-backend/mod.ts",
+    "@publicdomainrelay/container-backend-abc": "./lib/abc/container-backend/mod.ts",
+    "@publicdomainrelay/container-backend-docker": "./lib/container-backend-docker/mod.ts",
+    "@publicdomainrelay/container-backend-container": "./lib/container-backend-container/mod.ts",
     "@publicdomainrelay/hono-error-middleware": "../typescript-helpers/lib/hono-error-middleware/mod.ts",
     "@publicdomainrelay/logger": "../typescript-helpers/lib/logger/mod.ts",
     "@publicdomainrelay/atproto-repo-deno": "../hono-pds/lib/atproto-repo-deno/mod.ts",
