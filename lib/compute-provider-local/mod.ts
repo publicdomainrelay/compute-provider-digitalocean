@@ -11,7 +11,7 @@ import type {
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
-import { ProvisioningData } from "@publicdomainrelay/oidc-issuer";
+import { ProvisioningData, configureOidc } from "@publicdomainrelay/oidc-issuer";
 
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   acceptPathVm?: string;
@@ -558,12 +558,14 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     // exchange its provisioning token for a workload-identity OIDC token.
     // Bidder calls provision() directly (bypasses HTTP API), so enrichment
     // must happen here, not only in the hono-factory layer.
+    configureOidc({ getIssuerUrl });
     const provisioningData = await ProvisioningData.create(
       requesterPlc,
       user_data,
       getIssuerUrl(),
     );
     const enrichedUserData = provisioningData.userData;
+    provisioningData.associateWithDroplet(containerName);
 
     if (containerMode === "container") {
       log("info", "provisioning container", {
@@ -705,5 +707,6 @@ export function createLocalComputeProvider(
 
     createBidConfig,
     injectAcceptBundle: injectBundle,
+    getDroplet,
   };
 }

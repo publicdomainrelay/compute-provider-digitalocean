@@ -43,6 +43,7 @@ export interface ComputeProvider {
     userData: string,
     bundle: Record<string, unknown>,
   ): string;
+  getDroplet?(id: string): Record<string, unknown> | undefined;
   setup?(): Promise<void>;
   teardown?(): Promise<void>;
 }
