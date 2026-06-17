@@ -3,7 +3,7 @@ import { runContainer } from "@publicdomainrelay/compute-provider-local";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 
-const USER_DATA_PATH = new URL("./cloud-init.yaml", import.meta.url).pathname;
+const USER_DATA_PATH = new URL("./cloud-init-test.yaml", import.meta.url).pathname;
 const CALLBACK_TIMEOUT_MS = 120_000;
 
 Deno.test("[integration] cloud-init posts hostname to test callback server", async () => {
@@ -49,6 +49,8 @@ Deno.test("[integration] cloud-init posts hostname to test callback server", asy
     console.log(`[test] server bound to port ${port}`);
 
     let template = await Deno.readTextFile(USER_DATA_PATH);
+    const gatewayIp = await backend.defaultGateway();
+    template = template.replaceAll("<REPLACE_WITH_GATEWAY_IP>", gatewayIp);
     template = template.replaceAll("<REPLACE_WITH_TEST_PORT>", String(port));
     const userData = template;
 

@@ -4,17 +4,16 @@ import {
   ProvisioningData,
   OIDCToken,
 } from "@publicdomainrelay/oidc-issuer";
-import { pollSsh } from "@publicdomainrelay/compute-provider-local";
+import { runContainer } from "@publicdomainrelay/compute-provider-local";
+import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
+import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { getRBACRecord } from "@publicdomainrelay/rbac-atproto";
 import { createPlcDirectory } from "./plc_directory.ts";
 import { Hono } from "hono";
 
 const RBAC_NSID = "com.fedproxy.rbac";
-const VM_IMAGE = "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner:latest";
-const DISTRO = "ubuntu";
-const SSH_TIMEOUT_MS = 600_000;
-const CALLBACK_TIMEOUT_MS = 600_000;
+const CALLBACK_TIMEOUT_MS = 300_000;
 
 function allocatePort(): number {
   const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
@@ -23,34 +22,21 @@ function allocatePort(): number {
   return p;
 }
 
-async function dockerRm(containerName: string): Promise<void> {
-  await new Deno.Command("docker", {
-    args: ["rm", "-f", containerName],
-    stdout: "null", stderr: "null",
-  }).output().catch(() => {});
+async function cleanupContainer(backend: ContainerBackend, containerName: string): Promise<void> {
+  await backend.rm(containerName).catch(() => {});
 }
 
-Deno.test("[integration] VM receives workload token + RBAC issue", async () => {
-  if (!Deno.env.get("TEST_VM")) {
-    console.log("[test] TEST_VM not set — skipping VM test");
+Deno.test("[integration] Container receives workload token via callback + RBAC issue", async () => {
+  const backend: ContainerBackend = Deno.build.os === "darwin"
+    ? createContainerBackend()
+    : createDockerBackend();
+  const backendReady = await backend.ensureRunning();
+  if (!backendReady) {
+    console.log("[test] SKIP: container backend not available");
     return;
   }
-  try { Deno.statSync("/dev/kvm"); } catch {
-    console.log("[test] /dev/kvm not available — skipping VM test");
-    return;
-  }
 
-  const tmpDir = await Deno.makeTempDir();
-  const sshKeyPath = `${tmpDir}/vm_ssh_key`;
-
-  // Generate SSH keypair for accessing VM
-  await new Deno.Command("ssh-keygen", {
-    args: ["-t", "ed25519", "-f", sshKeyPath, "-N", "", "-C", "test-vm"],
-    stdout: "null", stderr: "null",
-  }).output();
-  const sshPubKey = await Deno.readTextFile(`${sshKeyPath}.pub`);
-
-  // Infrastructure
+  // Infrastructure ports
   const plcPort = allocatePort();
   const pdsPort = allocatePort();
   const issuerPort = allocatePort();
@@ -58,10 +44,11 @@ Deno.test("[integration] VM receives workload token + RBAC issue", async () => {
 
   const pdsUrl = `http://127.0.0.1:${pdsPort}`;
   const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
-  const docker = createDockerBackend();
-  const gatewayIp = await docker.defaultGateway();
+  const gatewayIp = await backend.defaultGateway();
+  // Issuer bound to 0.0.0.0 so container can reach it at gateway IP
   const issuerUrl = `http://${gatewayIp}:${issuerPort}`;
 
+  // Test data
   const actxUuid = crypto.randomUUID();
   const actxDid = `did:plc:${actxUuid}`;
   const requesterPlc = crypto.randomUUID().split("-")[0];
@@ -108,7 +95,7 @@ Deno.test("[integration] VM receives workload token + RBAC issue", async () => {
     createdAt: new Date().toISOString(),
   };
 
-  // Callback server — VM POSTs token here after provisioning
+  // Callback server — container POSTs token here after provisioning
   let resolveCallback: (v: { token: string }) => void;
   const callbackPromise = new Promise<{ token: string }>((resolve) => {
     resolveCallback = resolve;
@@ -145,7 +132,7 @@ Deno.test("[integration] VM receives workload token + RBAC issue", async () => {
   const pdsAc = new AbortController();
   Deno.serve({ port: pdsPort, hostname: "127.0.0.1", signal: pdsAc.signal }, pdsApp.fetch);
 
-  // Droplet — mutable
+  // Droplet — mutable, updated via onIp
   const dropletId = crypto.randomUUID().slice(0, 8);
   const droplet: Record<string, unknown> = {
     id: dropletId,
@@ -153,7 +140,7 @@ Deno.test("[integration] VM receives workload token + RBAC issue", async () => {
     tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
   };
 
-  // Compute provider
+  // OIDC issuer (bind 0.0.0.0 so container can reach)
   const { app } = createOidcIssuer({
     getIssuerUrl: () => issuerUrl,
     getDroplet: (id) => id === dropletId ? droplet : undefined,
@@ -168,14 +155,13 @@ Deno.test("[integration] VM receives workload token + RBAC issue", async () => {
   try {
     assertEquals(Object.keys((await getRBACRecord(pdsUrl, actxDid, issuerUrl, "droplets.wid")).roles).length, 1);
 
-    // User data: SSH key for access + callback after provisioning
+    // Base userData: agent user + poll for token file + POST to callback
     const callbackUrl = `http://${gatewayIp}:${callbackPort}/token`;
     const tokenPath = "/root/secrets/digitalocean.com/serviceaccount/token";
     const baseUserData = `#cloud-config
 users:
-  - name: root
-    ssh_authorized_keys:
-      - ${sshPubKey.trim()}
+  - name: agent
+    sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: false
 ssh_pwauth: true
 runcmd:
@@ -187,43 +173,15 @@ runcmd:
     const pd = await ProvisioningData.create(actxUuid, baseUserData, issuerUrl);
     pd.associateWithDroplet(dropletId);
 
-    // Write user-data
-    const cacheDir = "/root/.cache/simple-qemu";
-    const udFile = await Deno.makeTempFile({ prefix: "ud-", suffix: ".yaml" });
-    await Deno.writeTextFile(udFile, pd.userData);
-
-    // Launch QEMU VM
-    containerName = `test-vm-${crypto.randomUUID().slice(0, 8)}`;
-    await dockerRm(containerName);
-
-    console.log(`[test] Starting QEMU VM: ${containerName}`);
-    const runResult = await new Deno.Command("docker", {
-      args: [
-        "run", "-d",
-        "--name", containerName, "--privileged",
-        "--memory", "6g", "--memory-swap", "6g",
-        "--device", "/dev/kvm",
-        "-v", `${cacheDir}:/root/.cache/simple-qemu`,
-        "-v", `${udFile}:/tmp/user-data:ro`,
-        "-e", "USER_DATA_FILE=/tmp/user-data",
-        VM_IMAGE,
-        `--distro=${DISTRO}`,
-      ],
-      stdout: "piped", stderr: "piped",
-    }).output();
-    if (runResult.code !== 0) throw new Error(`docker run failed: ${new TextDecoder().decode(runResult.stderr)}`);
-
-    await new Promise((r) => setTimeout(r, 3_000));
-    const ip = await docker.inspectIp(containerName);
-    console.log(`[test] VM IP: ${ip}`);
-
-    const sshReady = await pollSsh(ip, 22, SSH_TIMEOUT_MS);
-    if (!sshReady) throw new Error(`SSH not ready for ${containerName}`);
-
-    // Update droplet with real IP + containerName
-    droplet["networks"] = { v4: [{ ip_address: ip, type: "public" }] };
-    droplet["containerName"] = containerName;
-    console.log(`[test] SSH ready, waiting for token callback...`);
+    // Launch container — onIp updates droplet BEFORE cloud-init runs prove
+    containerName = `test-rbac-cb-${crypto.randomUUID().slice(0, 8)}`;
+    const info = await runContainer(backend, pd.userData, {
+      distro: "ubuntu",
+      containerName,
+      onIp(ip, _name) {
+        droplet["networks"] = { v4: [{ ip_address: ip, type: "public" }] };
+      },
+    });
 
     // Wait for callback with token
     const timeout = setTimeout(() => resolveCallback({ token: "" }), CALLBACK_TIMEOUT_MS);
@@ -233,7 +191,7 @@ runcmd:
     if (!workloadToken || workloadToken.length < 10) {
       throw new Error("No token received via callback");
     }
-    console.log(`[test] Token received (${workloadToken.length} chars)`);
+    console.log(`[test] Token received via callback (${workloadToken.length} chars)`);
 
     const validatedWl = await OIDCToken.validate(workloadToken);
     assertEquals(validatedWl.actx, actxUuid);
@@ -265,7 +223,6 @@ runcmd:
     plcAc.abort();
     pdsAc.abort();
     callbackAc.abort();
-    if (containerName) await dockerRm(containerName);
-    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
+    if (containerName) await cleanupContainer(backend, containerName);
   }
 });

@@ -34,6 +34,27 @@ export function createDockerBackend(): ContainerBackend {
       return stdout;
     },
 
+    async inspectGateway(containerName: string): Promise<string> {
+      const { code, stdout } = await cli([
+        "inspect", "--format",
+        "{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}",
+        containerName,
+      ]);
+      if (code !== 0) throw new Error(`docker inspect failed for ${containerName}`);
+      if (!stdout) throw new Error(`no gateway found in docker inspect for ${containerName}`);
+      return stdout;
+    },
+
+    async defaultGateway(): Promise<string> {
+      const { code, stdout } = await cli([
+        "network", "inspect", "bridge", "--format",
+        "{{(index .IPAM.Config 0).Gateway}}",
+      ]);
+      if (code !== 0) throw new Error("docker network inspect failed");
+      if (!stdout) throw new Error("no gateway found in docker network inspect");
+      return stdout;
+    },
+
     async imageExists(tag: string): Promise<boolean> {
       const { code, stdout } = await cli(["images", "-q", tag]);
       return code === 0 && stdout.length > 0;

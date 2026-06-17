@@ -33,6 +33,24 @@ export function createContainerBackend(): ContainerBackend {
       return addr.split("/")[0];
     },
 
+    async inspectGateway(containerName: string): Promise<string> {
+      const { code, stdout } = await cli(["inspect", containerName]);
+      if (code !== 0) throw new Error(`container inspect failed for ${containerName}`);
+      const info = JSON.parse(stdout);
+      const gw = info?.[0]?.status?.networks?.[0]?.ipv4Gateway;
+      if (!gw) throw new Error(`no gateway found in container inspect for ${containerName}`);
+      return gw;
+    },
+
+    async defaultGateway(): Promise<string> {
+      const { code, stdout } = await cli(["network", "inspect", "default"]);
+      if (code !== 0) throw new Error("container network inspect failed");
+      const info = JSON.parse(stdout);
+      const gw = info?.[0]?.status?.ipv4Gateway;
+      if (!gw) throw new Error("no gateway found in container network inspect");
+      return gw;
+    },
+
     async imageExists(tag: string): Promise<boolean> {
       const { code } = await cli(["image", "inspect", tag]);
       return code === 0;

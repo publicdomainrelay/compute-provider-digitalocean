@@ -10,6 +10,12 @@ export interface ContainerBackend {
   /** Get container IP address (no CIDR suffix). */
   inspectIp(containerName: string): Promise<string>;
 
+  /** Get host gateway IP reachable from inside the container. */
+  inspectGateway(containerName: string): Promise<string>;
+
+  /** Get default bridge gateway IP (no container required). */
+  defaultGateway(): Promise<string>;
+
   /** Check if image exists locally. */
   imageExists(tag: string): Promise<boolean>;
 

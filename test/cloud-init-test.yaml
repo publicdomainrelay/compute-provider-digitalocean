@@ -1,0 +1,17 @@
+#cloud-config
+users:
+  - name: agent
+    gecos: Policy Engine Agent
+    primary_group: agent
+    groups:
+      - users
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    no_user_group: false
+
+runcmd:
+  - |
+    set -x
+    echo '{}' | jq --arg hostname "$(hostname)" '{hostname: $hostname}' | curl -sf --json @- "http://<REPLACE_WITH_GATEWAY_IP>:<REPLACE_WITH_TEST_PORT>/cloud-init-done"
+    echo "CLOUD_INIT_RUNCMD_COMPLETE"

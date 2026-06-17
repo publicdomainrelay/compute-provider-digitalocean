@@ -2,7 +2,7 @@ import { assertEquals } from "@std/assert";
 import { pollSsh } from "@publicdomainrelay/compute-provider-local";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 
-const USER_DATA_PATH = new URL("./cloud-init.yaml", import.meta.url).pathname;
+const USER_DATA_PATH = new URL("./cloud-init-test.yaml", import.meta.url).pathname;
 const VM_IMAGE = "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner:latest";
 const QEMU_SCRIPT = new URL(
   "../hono-qemu-standalone/mod.ts",
@@ -126,7 +126,10 @@ Deno.test("[integration] QEMU VM boots cloud-init and posts hostname to callback
     const port = server.addr.port;
     console.log(`[test] callback server on port ${port}`);
 
+    const docker = createDockerBackend();
     let template = await Deno.readTextFile(USER_DATA_PATH);
+    const gatewayIp = await docker.defaultGateway();
+    template = template.replaceAll("<REPLACE_WITH_GATEWAY_IP>", gatewayIp);
     template = template.replaceAll("<REPLACE_WITH_TEST_PORT>", String(port));
     const userData = template;
 
@@ -177,7 +180,6 @@ Deno.test("[integration] QEMU VM boots cloud-init and posts hostname to callback
     try {
       await new Promise((r) => setTimeout(r, 2_000));
 
-      const docker = createDockerBackend();
       const ip = await docker.inspectIp(containerName);
       console.log(`[test] QEMU container IP: ${ip}`);
 

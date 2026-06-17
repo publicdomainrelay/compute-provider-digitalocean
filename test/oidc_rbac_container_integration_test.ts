@@ -64,14 +64,15 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
   }
 
   // Infrastructure ports. Compute provider binds 0.0.0.0 so containers reach it
-  // at 172.17.0.1 (Docker bridge). All other infra on 127.0.0.1.
+  // at the bridge gateway (queried from backend). All other infra on 127.0.0.1.
   const plcPort = allocatePort();
   const pdsPort = allocatePort();
   const issuerPort = allocatePort();
 
   const pdsUrl = `http://127.0.0.1:${pdsPort}`;
   const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
-  const issuerUrl = `http://172.17.0.1:${issuerPort}`;
+  const gatewayIp = await backend.defaultGateway();
+  const issuerUrl = `http://${gatewayIp}:${issuerPort}`;
 
   // Test data
   const actxUuid = crypto.randomUUID();
@@ -170,9 +171,8 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
     const info = await runContainer(backend, pd.userData, {
       distro: "ubuntu",
       containerName,
-      onIp(ip, name) {
+      onIp(ip, _name) {
         droplet["networks"] = { v4: [{ ip_address: ip, type: "public" }] };
-        droplet["containerName"] = name;
       },
     });
 

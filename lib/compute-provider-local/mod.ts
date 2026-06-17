@@ -41,6 +41,7 @@ export interface ContainerOptions {
 export interface ContainerInfo {
   ip: string;
   containerName: string;
+  gateway: string;
 }
 
 const COMPUTE_CONFIG_WIF_SIMPLE_NSID =
@@ -279,6 +280,14 @@ export async function runContainer(
   const ip = await backend.inspectIp(containerName);
   console.log(`==> Container IP: ${ip}`);
 
+  let gateway = ip;
+  try {
+    gateway = await backend.inspectGateway(containerName);
+    console.log(`==> Container gateway: ${gateway}`);
+  } catch {
+    console.log(`==> Container gateway: (unavailable, using ip=${ip})`);
+  }
+
   if (opts.onIp) await opts.onIp(ip, containerName);
 
   console.log("==> Waiting for SSH...");
@@ -297,7 +306,7 @@ export async function runContainer(
   await Deno.remove(udFile).catch(() => {});
   await Deno.remove(epFile).catch(() => {});
 
-  return { ip, containerName };
+  return { ip, containerName, gateway };
 }
 
 async function provisionVM(
