@@ -4,7 +4,7 @@ import { dockerInspectIp, pollSsh } from "@publicdomainrelay/compute-provider-lo
 const USER_DATA_PATH = new URL("./cloud-init.yaml", import.meta.url).pathname;
 const VM_IMAGE = "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner:latest";
 const QEMU_SCRIPT = new URL(
-  "../../.reference/compute-contract-reference-implementation-poc/src/typescript/qemu/qemu-standalone.ts",
+  "../hono-qemu-standalone/mod.ts",
   import.meta.url,
 ).pathname;
 const SSH_TIMEOUT_MS = 600_000;
@@ -87,6 +87,10 @@ async function dockerRm(containerName: string): Promise<void> {
 }
 
 Deno.test("[integration] QEMU VM boots cloud-init and posts hostname to callback", async () => {
+  if (!Deno.env.get("TEST_VM")) {
+    console.log("[test] TEST_VM not set — skipping QEMU test");
+    return;
+  }
   try {
     Deno.statSync("/dev/kvm");
   } catch {

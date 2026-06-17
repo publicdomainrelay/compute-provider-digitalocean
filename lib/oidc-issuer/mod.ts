@@ -11,11 +11,19 @@ import {
   type OidcIssuerOptions,
   type OidcIssuer,
   type ProvisioningDataInit,
+  type AuthToken,
   UnauthorizedException,
   parseAudience,
 } from "@publicdomainrelay/oidc-issuer-abc";
+import {
+  resolvePDS,
+  getRBACRecord,
+  collectIssuers,
+  checkRBACPolicy,
+} from "@publicdomainrelay/rbac-atproto";
 
 export type { Logger, JwkStore, NonceStore, OIDCTokenData, OidcIssuerOptions, OidcIssuer };
+export { UnauthorizedException };
 
 function extractBearer(authHeader: string | undefined): string {
   if (!authHeader) throw new UnauthorizedException("Missing Authorization header");
@@ -392,7 +400,7 @@ async function validateSshSignature(
 ): Promise<boolean> {
   const tmpDir = await Deno.makeTempDir();
   try {
-    await Deno.writeTextFile(`${tmpDir}/allowed_signing_key.pub`, publicKeyOpensshString);
+    await Deno.writeTextFile(`${tmpDir}/allowed_signing_key.pub`, `* ${publicKeyOpensshString}`);
     await Deno.writeTextFile(`${tmpDir}/signature`, sshSignatureBlob);
     const dataPath = `${tmpDir}/data`;
     await Deno.writeTextFile(dataPath, dataThatWasSigned);
@@ -446,13 +454,66 @@ async function provisioningValidate(
   return { oidcToken, droplet };
 }
 
+async function raiseIfUnauthorized(
+  service: string,
+  scope: string,
+  token: string,
+  path: string,
+  method: string,
+  plcDirectoryUrl = "https://plc.directory",
+): Promise<AuthToken> {
+  const unverifiedPayload = (() => {
+    try {
+      const [, payloadB64] = token.split(".");
+      return JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+    } catch {
+      return {};
+    }
+  })();
+
+  const rawAud = Array.isArray(unverifiedPayload.aud)
+    ? unverifiedPayload.aud[0]
+    : unverifiedPayload.aud as string ?? "";
+
+  let rbac = null;
+  let getIssuers: ((api: string, actx: string) => Promise<string[]>) | undefined;
+
+  let { actx, api } = parseAudience(rawAud);
+  if (actx.includes(".")) {
+    actx = "did:web:" + actx;
+  } else {
+    actx = "did:plc:" + actx;
+  }
+
+  try {
+    const pdsURL = await resolvePDS(actx, plcDirectoryUrl);
+    rbac = await getRBACRecord(pdsURL, actx, service, scope);
+    const issuers = collectIssuers(rbac);
+    getIssuers = async (_api: string, _actx: string) => issuers;
+    void api;
+  } catch (err) {
+    throw new UnauthorizedException(
+      `failed to resolve RBAC for actx=${actx}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  const oidcToken = await OIDCToken.validate(token, getIssuers);
+
+  if (rbac) {
+    checkRBACPolicy(rbac, oidcToken.sub, path, method);
+  }
+
+  return oidcToken as AuthToken;
+}
+
 export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
-  const { getIssuerUrl, getDroplet } = opts;
+  const { getIssuerUrl, getDroplet, serviceUrl } = opts;
+  const plcDirectoryUrl = opts.plcDirectoryUrl ?? "https://plc.directory";
   const log = opts.log ?? noopLogger;
 
   configureOidc({ getIssuerUrl });
 
-  const app = new Hono<{ Variables: { actx: string } }>();
+  const app = new Hono<{ Variables: { authToken: AuthToken; actx: string } }>();
 
   app.use("*", cors());
 
@@ -482,10 +543,19 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
   app.use("/v1/oidc/issue", async (c, next) => {
     try {
       const token = extractBearer(c.req.header("Authorization"));
-      c.set("actx", token);
+      const authToken = await raiseIfUnauthorized(
+        serviceUrl,
+        "droplets.wid",
+        token,
+        "/v1/oidc/issue",
+        c.req.method,
+        plcDirectoryUrl,
+      );
+      c.set("authToken", authToken);
+      c.set("actx", authToken.actx);
       await next();
     } catch (err) {
-      log("warn", "auth denied /v1/oidc/issue", { error: String(err) });
+      log("warn", "rbac denied /v1/oidc/issue", { error: String(err) });
       return c.json({ id: "unauthorized", message: String(err) }, 401);
     }
   });
@@ -493,7 +563,8 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
   app.post("/v1/oidc/issue", async (c) => {
     try {
       const body = await c.req.json<Record<string, unknown>>();
-      const actx = c.get("actx");
+      const authToken = c.get("authToken") as AuthToken;
+      const actx = authToken.actx;
 
       const sub = (body["sub"] as string | undefined) ?? actx;
       if (!subMatchesActx(sub, actx)) {

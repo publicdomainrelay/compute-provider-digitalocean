@@ -45,10 +45,19 @@ export interface ProvisioningDataInit {
 export interface OidcIssuerOptions {
   getIssuerUrl: () => string;
   getDroplet: (id: string) => Record<string, unknown> | undefined;
+  serviceUrl: string;
+  plcDirectoryUrl?: string;
   log?: Logger;
   onIssuerUrl?: (baseUrl: string) => void | Promise<void>;
 }
 
 export interface OidcIssuer {
-  app: Hono<{ Variables: { actx: string } }>;
+  app: Hono<{ Variables: { authToken: AuthToken; actx: string } }>;
+}
+
+export interface AuthToken {
+  sub: string;
+  actx: string;
+  asString: string;
+  claims: Record<string, unknown>;
 }

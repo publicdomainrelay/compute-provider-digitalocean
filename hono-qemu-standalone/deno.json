@@ -1,0 +1,11 @@
+{
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "imports": {
+    "@publicdomainrelay/qemu-standalone": "jsr:@publicdomainrelay/qemu-standalone@^0",
+    "@publicdomainrelay/cli-args-env": "jsr:@publicdomainrelay/cli-args-env@^0"
+  },
+  "compile": {
+    "include": ["cli-args-env.json"]
+  }
+}

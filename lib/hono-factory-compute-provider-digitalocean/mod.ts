@@ -96,6 +96,7 @@ export function createComputeProviderDigitalOceanFactory(
   const oidcIssuer = createOidcIssuer({
     getIssuerUrl,
     getDroplet: getDropletById,
+    serviceUrl: getIssuerUrl(),
     log: (level, msg, extra) => {
       if (level === "info") log.info(msg, extra);
       else if (level === "warn") log.warn(msg, extra);

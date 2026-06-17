@@ -1,0 +1,12 @@
+{
+  "name": "qemu-standalone",
+  "description": "Build and run Fedora or Ubuntu SquashFS LiveOS using QEMU",
+  "options": {
+    "distro": {
+      "type": "string",
+      "env": "QEMU_DISTRO",
+      "default": "ubuntu",
+      "description": "Distribution to use (fedora or ubuntu)"
+    }
+  }
+}

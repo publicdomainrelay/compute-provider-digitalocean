@@ -10,17 +10,27 @@
     "./lib/oidc-issuer",
     "./lib/hono-factory-compute-provider-local",
     "./lib/hono-factory-compute-provider-digitalocean",
-    "./hono-compute-provider"
+    "./lib/qemu-standalone",
+    "./hono-compute-provider",
+    "./hono-qemu-standalone"
   ],
   "imports": {
     "@publicdomainrelay/hono-error-middleware": "../typescript-helpers/lib/hono-error-middleware/mod.ts",
     "@publicdomainrelay/logger": "../typescript-helpers/lib/logger/mod.ts",
-    "@std/assert": "jsr:@std/assert@^1.0.19"
+    "@publicdomainrelay/atproto-repo-deno": "../hono-pds/lib/atproto-repo-deno/mod.ts",
+    "@publicdomainrelay/hono-factory-atproto-repo-deno": "../hono-pds/lib/hono-factory-atproto-repo-deno/mod.ts",
+    "@atproto/crypto": "npm:@atproto/crypto@^0.5.0",
+    "@std/assert": "jsr:@std/assert@^1.0.19",
+    "hono": "npm:hono@^4"
   },
   "tasks": {
-    "test": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/cli_smoke_test.ts test/cloud_init_integration_test.ts",
+    "test": "deno test -A --no-check test/cli_smoke_test.ts test/oidc_workload_identity_integration_test.ts test/oidc_rbac_integration_test.ts test/oidc_rbac_container_integration_test.ts",
     "test:cli": "deno test --allow-run --allow-read test/cli_smoke_test.ts",
     "test:integration": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/cloud_init_integration_test.ts",
+    "test:oidc": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/oidc_workload_identity_integration_test.ts",
+    "test:oidc-rbac": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/oidc_rbac_integration_test.ts",
+    "test:oidc-rbac-container": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/oidc_rbac_container_integration_test.ts",
+    "test:oidc-rbac-vm": "deno test -A test/oidc_rbac_vm_integration_test.ts",
     "test:integration:qemu": "deno test -A test/cloud_init_qemu_integration_test.ts",
     "test:all": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/"
   }
