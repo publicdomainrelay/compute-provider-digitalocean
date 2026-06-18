@@ -206,9 +206,12 @@ async function copySystemctlShim(
   const systemctlShimSrc = new URL(
     "./systemctl-shim.ts",
     import.meta.url,
-  ).pathname;
+  );
   const dst = `${cacheDir}/systemctl-shim-${distro}.ts`;
-  await Deno.copyFile(systemctlShimSrc, dst);
+  const resp = await fetch(systemctlShimSrc);
+  if (!resp.ok) throw new Error(`Failed to load systemctl-shim: ${resp.status}`);
+  const content = await resp.text();
+  await Deno.writeTextFile(dst, content);
   return dst;
 }
 
