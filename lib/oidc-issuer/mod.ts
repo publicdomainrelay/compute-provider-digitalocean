@@ -363,18 +363,22 @@ async function getPublicKeyFromSshd(
   port: number,
   containerName?: string,
 ): Promise<string> {
+  const containerCli = (() => { try { Deno.statSync("/usr/local/bin/container"); return "/usr/local/bin/container"; } catch { return "docker"; } })();
   const deadline = Date.now() + 300_000;
   while (Date.now() < deadline) {
     try {
-      const cmd = containerName
-        ? new Deno.Command("docker", {
-            args: ["exec", containerName, "ssh-keyscan", "-t", "ed25519", "-p", String(port), "127.0.0.1"],
-            stdout: "piped", stderr: "piped",
-          })
-        : new Deno.Command("ssh-keyscan", {
-            args: ["-t", "ed25519", "-p", String(port), publicIpv4],
-            stdout: "piped", stderr: "piped",
-          });
+      let cmd: Deno.Command;
+      if (containerName) {
+        cmd = new Deno.Command(containerCli, {
+          args: ["exec", containerName, "ssh-keyscan", "-t", "ed25519", "-p", String(port), "127.0.0.1"],
+          stdout: "piped", stderr: "piped",
+        });
+      } else {
+        cmd = new Deno.Command("ssh-keyscan", {
+          args: ["-t", "ed25519", "-p", String(port), publicIpv4],
+          stdout: "piped", stderr: "piped",
+        });
+      }
       const { code, stdout } = await cmd.output();
       const out = new TextDecoder().decode(stdout).trim();
 
@@ -461,6 +465,7 @@ async function raiseIfUnauthorized(
   path: string,
   method: string,
   plcDirectoryUrl = "https://plc.directory",
+  log: (level: string, msg: string, meta?: Record<string, unknown>) => void = () => {},
 ): Promise<AuthToken> {
   const unverifiedPayload = (() => {
     try {
@@ -485,22 +490,30 @@ async function raiseIfUnauthorized(
     actx = "did:plc:" + actx;
   }
 
+  log("info", "rbac gate", { actx, api, service, scope, path, method, rawAud });
+
+  let pdsURL = "";
   try {
-    const pdsURL = await resolvePDS(actx, plcDirectoryUrl);
-    rbac = await getRBACRecord(pdsURL, actx, service, scope);
+    pdsURL = await resolvePDS(actx, plcDirectoryUrl);
+    log("info", "rbac gate resolved pds", { actx, pdsURL });
+    rbac = await getRBACRecord(pdsURL, actx, service, scope, log);
     const issuers = collectIssuers(rbac);
+    log("info", "rbac gate issuers", { actx, issuers });
     getIssuers = async (_api: string, _actx: string) => issuers;
     void api;
   } catch (err) {
+    log("warn", "rbac gate resolve failed", { actx, service, scope, pdsURL, error: String(err) });
     throw new UnauthorizedException(
       `failed to resolve RBAC for actx=${actx}: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
   const oidcToken = await OIDCToken.validate(token, getIssuers);
+  log("info", "rbac gate token validated", { actx, sub: oidcToken.sub });
 
   if (rbac) {
     checkRBACPolicy(rbac, oidcToken.sub, path, method);
+    log("info", "rbac gate authorized", { actx, sub: oidcToken.sub, path, method });
   }
 
   return oidcToken as AuthToken;
@@ -550,6 +563,7 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
         "/v1/oidc/issue",
         c.req.method,
         plcDirectoryUrl,
+        log,
       );
       c.set("authToken", authToken);
       c.set("actx", authToken.actx);
@@ -568,10 +582,12 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
 
       const sub = (body["sub"] as string | undefined) ?? actx;
       if (!subMatchesActx(sub, actx)) {
+        log("warn", "issue sub mismatch", { actx, sub });
         return c.json({ id: "unauthorized", message: `sub must be scoped to actx:${actx}` }, 401);
       }
 
       const token = await OIDCToken.create(actx, { ...body, sub });
+      log("info", "issue token", { actx, sub });
       return c.json({ token: token.asString });
     } catch (err) {
       log("error", "oidc issue failed", { error: String(err) });
@@ -586,11 +602,15 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
 
       const provToken = await OIDCToken.validate(token);
       const actx = provToken.actx;
+      log("info", "prove start", { actx, sub: provToken.sub, port: body.port });
 
       const result = await provisioningValidate(token, body.sig, body.port, (id) => {
         return getDroplet(id);
       });
-      if (!result) return c.json({ valid: false });
+      if (!result) {
+        log("warn", "prove rejected", { actx, reason: "provisioningValidate returned null" });
+        return c.json({ valid: false });
+      }
 
       const { oidcToken, droplet } = result;
       const dropletTags = ((droplet["tags"] as string[]) ?? []);
@@ -605,6 +625,7 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
         sub: subject,
         droplet_id: droplet["id"],
       });
+      log("info", "prove issued", { actx: oidcToken.actx, sub: subject, dropletId: droplet["id"] });
       return c.json({ token: issued.asString });
     } catch (err) {
       log("error", "oidc prove failed", { error: String(err), stack: err instanceof Error ? err.stack : undefined });

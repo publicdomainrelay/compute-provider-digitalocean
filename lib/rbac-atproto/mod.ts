@@ -183,11 +183,16 @@ export async function getRBACRecord(
   did: string,
   service: string,
   scope: string,
+  log?: (level: string, msg: string, meta?: Record<string, unknown>) => void,
 ): Promise<RBACRecord> {
   const joined: RBACRecord = { policies: {}, roles: {} };
   let cursor = "";
   let total = 0;
   let anyProtects = false;
+  let scanned = 0;
+  const seenServices: string[] = [];
+
+  log?.("info", "rbac lookup start", { pdsURL, did, wantService: service, wantScope: scope });
 
   for (;;) {
     const url = new URL(`${pdsURL}/xrpc/com.atproto.repo.listRecords`);
@@ -203,8 +208,10 @@ export async function getRBACRecord(
 
     for (const rec of out.records ?? []) {
       const rbac = rec.value;
+      scanned++;
       let protectsThis = false;
       for (const [_name, protects] of Object.entries(rbac.protects ?? {})) {
+        seenServices.push(`${protects.service}|${protects.scope ?? ""}`);
         if (protects.service === service || protects.service === "*") {
           if (protects.scope === scope || protects.scope === "*" || !protects.scope) {
             protectsThis = true;
@@ -212,6 +219,11 @@ export async function getRBACRecord(
           break;
         }
       }
+      log?.("info", "rbac record scanned", {
+        uri: rec.uri,
+        matched: protectsThis,
+        protects: Object.values(rbac.protects ?? {}).map((p) => `${p.service}|${p.scope ?? ""}`),
+      });
       if (!protectsThis) continue;
       anyProtects = true;
       for (const [name, policy] of Object.entries(rbac.policies ?? {})) {
@@ -228,11 +240,13 @@ export async function getRBACRecord(
   }
 
   if (!anyProtects) {
+    log?.("warn", "rbac no match", { did, wantService: service, wantScope: scope, scanned, seenServices });
     throw new Error(
-      `no com.fedproxy.rbac records protect did=${did} service=${service} scope=${scope}`,
+      `no com.fedproxy.rbac records protect did=${did} service=${service} scope=${scope} (scanned=${scanned} seen=[${seenServices.join(", ")}])`,
     );
   }
   if (total === 0) throw new Error(`no com.fedproxy.rbac record found for did=${did}`);
+  log?.("info", "rbac matched", { did, total, roles: Object.keys(joined.roles) });
   return joined;
 }
 

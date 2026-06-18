@@ -12,6 +12,7 @@ import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc"
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
 import { ProvisioningData, configureOidc } from "@publicdomainrelay/oidc-issuer";
+import { configureRbac, type RbacContext } from "@publicdomainrelay/rbac-atproto";
 
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   acceptPathVm?: string;
@@ -532,16 +533,25 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
     let rbacRef: StrongRef | undefined;
     if (createRecord) {
-      rbacRef = await createRecord("com.fedproxy.rbac", {
-        $type: "com.fedproxy.rbac",
-        protects: {
-          [`ex-${agentDidPlc}-${requesterPlc}-${vm.role}`]: {
-            service: getIssuerUrl(),
-            scope: "droplets.wid",
-          },
-        },
-        createdAt: new Date().toISOString(),
+      const rbacCtx: RbacContext = {
+        getAgentDid,
+        getIssuerUrl,
+        createRecord,
+        deleteRecord,
+        parseAtUri,
+        log: (level, msg, meta) => log(level, msg, meta),
+      };
+      log("info", "provision rbac write", {
+        repo: getAgentDid(),
+        actx: agentDidPlc,
+        requesterPlc,
+        role: vm.role,
+        service: getIssuerUrl(),
       });
+      rbacRef = await configureRbac(vm, requesterDid, rbacCtx);
+      log("info", "provision rbac written", { uri: rbacRef.uri });
+    } else {
+      log("warn", "provision rbac skipped", { reason: "no createRecord" });
     }
 
     const droplet: LocalDroplet = {
@@ -559,8 +569,13 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     // Bidder calls provision() directly (bypasses HTTP API), so enrichment
     // must happen here, not only in the hono-factory layer.
     configureOidc({ getIssuerUrl });
+    log("info", "provision token config", {
+      teamUuid: agentDidPlc,
+      issuerUrl: getIssuerUrl(),
+      containerName,
+    });
     const provisioningData = await ProvisioningData.create(
-      requesterPlc,
+      agentDidPlc,
       user_data,
       getIssuerUrl(),
     );
