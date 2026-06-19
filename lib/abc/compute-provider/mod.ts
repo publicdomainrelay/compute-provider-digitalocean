@@ -59,3 +59,12 @@ export function parseAtUri(uri: string): { repo: string; collection: string; rke
     rkey: parts[1] ?? "",
   };
 }
+
+export interface RbacProvisioner {
+  provision(vm: { role: string }, requesterDid: string, ctx: {
+    getAgentDid: () => string;
+    getIssuerUrl: () => string;
+    createRecord: (collection: string, record: Record<string, unknown>) => Promise<{ uri: string }>;
+    parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
+  }): Promise<{ uri: string } | undefined>;
+}

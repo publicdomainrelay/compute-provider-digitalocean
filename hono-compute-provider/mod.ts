@@ -24,7 +24,7 @@ const providerMode = (options.provider as string) === "digitalocean"
   ? "digitalocean" as const
   : "local" as const;
 
-const issuerUrl = (options.issuerUrl as string) || `http://localhost:${port}`;
+const issuerUrl = options.issuerUrl as string;
 const operatorHandle = options.operatorHandle as string;
 const selfDid = options.selfDid as string;
 const cacheDir = options.cacheDir as string | undefined;

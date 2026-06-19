@@ -1,23 +1,21 @@
-import type { Distro, DistroConfig } from "@publicdomainrelay/qemu-standalone";
+import type { Distro } from "@publicdomainrelay/qemu-standalone";
 import { buildImage, runVM } from "@publicdomainrelay/qemu-standalone";
 import { Command } from "@publicdomainrelay/cli-args-env";
 import cliArgsEnv from "./cli-args-env.json" with { type: "json" };
 
-const subcommand = Deno.args.find((a) => a === "build" || a === "run");
-if (!subcommand) {
-  console.error("Usage: qemu-standalone build|run [--distro=fedora|ubuntu]");
-  console.error("  build  Create SquashFS LiveOS disk image");
-  console.error("  run    Start QEMU VM (reads cloud-init user-data from stdin or USER_DATA_FILE)");
-  Deno.exit(1);
-}
-
-const rest = Deno.args.filter((a) => a !== subcommand);
 const { options } = await new Command(
   "CONFIG_PATH_HONO_QEMU_STANDALONE",
   cliArgsEnv,
   null,
-  rest,
 ).resolve();
+
+const subcommand = options.subcommand as string;
+if (subcommand !== "build" && subcommand !== "run") {
+  console.error("Usage: ... --subcommand build|run [--distro=fedora|ubuntu]");
+  console.error("  build  Create SquashFS LiveOS disk image");
+  console.error("  run    Start QEMU VM (reads cloud-init user-data from stdin or USER_DATA_FILE)");
+  Deno.exit(1);
+}
 
 const distro = options.distro as Distro;
 if (distro !== "fedora" && distro !== "ubuntu") {
@@ -29,7 +27,7 @@ if (subcommand === "build") {
   await buildImage(distro);
 } else {
   let userData = "";
-  const filePath = Deno.env.get("USER_DATA_FILE");
+  const filePath = options.userDataFile as string | undefined;
   if (filePath) {
     try {
       userData = await Deno.readTextFile(filePath);

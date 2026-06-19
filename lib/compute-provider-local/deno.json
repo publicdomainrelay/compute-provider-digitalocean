@@ -11,8 +11,6 @@
   },
   "imports": {
     "@publicdomainrelay/compute-provider-abc": "jsr:@publicdomainrelay/compute-provider-abc@^0",
-    "@publicdomainrelay/oidc-issuer": "jsr:@publicdomainrelay/oidc-issuer@^0",
-    "@publicdomainrelay/rbac-atproto": "jsr:@publicdomainrelay/rbac-atproto@^0",
     "yaml": "npm:yaml@^2.7.0"
   }
 }

@@ -7,6 +7,16 @@
       "env": "QEMU_DISTRO",
       "default": "ubuntu",
       "description": "Distribution to use (fedora or ubuntu)"
+    },
+    "subcommand": {
+      "type": "string",
+      "description": "Subcommand: build or run",
+      "env": "QEMU_SUBCOMMAND"
+    },
+    "user-data-file": {
+      "type": "string",
+      "description": "Path to user data file for QEMU",
+      "env": "USER_DATA_FILE"
     }
   }
 }

@@ -1,4 +1,3 @@
-import type { Hono } from "hono";
 import type { Logger } from "@publicdomainrelay/logger";
 
 export class UnauthorizedException extends Error {
@@ -52,7 +51,7 @@ export interface OidcIssuerOptions {
 }
 
 export interface OidcIssuer {
-  app: Hono<{ Variables: { authToken: AuthToken; actx: string } }>;
+  app: { fetch: (req: Request) => Response | Promise<Response> };
 }
 
 export interface AuthToken {
@@ -60,4 +59,12 @@ export interface AuthToken {
   actx: string;
   asString: string;
   claims: Record<string, unknown>;
+}
+
+export interface OidcProvisioningEnricher {
+  enrich(userData: string, teamUuid: string, issuerUrl: string): Promise<{
+    userData: string;
+    nonce: string;
+    associateWithDroplet(dropletId: string): void;
+  }>;
 }

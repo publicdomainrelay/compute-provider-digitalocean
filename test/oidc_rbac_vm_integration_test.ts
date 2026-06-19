@@ -3,7 +3,7 @@ import {
   createOidcIssuer,
   ProvisioningData,
   OIDCToken,
-} from "@publicdomainrelay/oidc-issuer";
+} from "@publicdomainrelay/oidc-issuer-hono";
 import { pollSsh } from "@publicdomainrelay/compute-provider-local";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { getRBACRecord } from "@publicdomainrelay/rbac-atproto";

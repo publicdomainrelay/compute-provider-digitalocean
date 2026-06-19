@@ -1,5 +1,6 @@
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
+import type { Hono } from "hono";
 import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
 import type { VM, ProvisionResult } from "@publicdomainrelay/compute-provider-abc";
@@ -7,7 +8,8 @@ import { spawnVM, defaultCacheDir } from "@publicdomainrelay/compute-provider-lo
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
-import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
+import { createOidcIssuer, createOidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-hono";
+import { createRbacProvisioner } from "@publicdomainrelay/rbac-atproto";
 
 export interface DropletCreateRequest {
   name: string;
@@ -108,6 +110,9 @@ export function createComputeProviderLocalFactory(
 
   const dropletsByActx = new Map<string, Map<string, Droplet>>();
 
+  const oidcProvisioningEnricher = createOidcProvisioningEnricher(getIssuerUrl);
+  const rbacProvisioner = createRbacProvisioner();
+
   function getDropletsMap(actx: string): Map<string, Droplet> {
     let m = dropletsByActx.get(actx);
     if (!m) { m = new Map(); dropletsByActx.set(actx, m); }
@@ -145,7 +150,7 @@ export function createComputeProviderLocalFactory(
         await next();
       });
 
-      app.route("/", oidcIssuer.app);
+      app.route("/", oidcIssuer.app as unknown as Hono);
 
       app.use("/v2/account", async (c, next) => {
         try {
@@ -203,14 +208,14 @@ export function createComputeProviderLocalFactory(
           const droplet = makeDroplet(body);
           getDropletsMap(actx).set(droplet.id, droplet);
 
-          const provisioningData = await ProvisioningData.create(actx, body.user_data ?? null, getIssuerUrl());
-          body.user_data = provisioningData.userData;
-          provisioningData.associateWithDroplet(droplet.id);
+          const enriched = await oidcProvisioningEnricher.enrich(body.user_data ?? "", actx, getIssuerUrl());
+          body.user_data = enriched.userData;
+          enriched.associateWithDroplet(droplet.id);
 
           log.info("droplets.create -> local VM", { name: body.name, actx });
           spawnVM({
             droplet: droplet as unknown as Record<string, unknown>,
-            userData: provisioningData.userData,
+            userData: enriched.userData,
             vmImage: opts.vmImage,
             containerMode: opts.containerMode,
             containerImage: opts.containerImage,
@@ -278,8 +283,8 @@ export function createComputeProviderLocalFactory(
       });
       getDropletsMap(actx).set(droplet.id, droplet);
 
-      const provisioningData = await ProvisioningData.create(actx, vm.user_data, getIssuerUrl());
-      provisioningData.associateWithDroplet(droplet.id);
+      const enriched = await oidcProvisioningEnricher.enrich(vm.user_data ?? null, actx, getIssuerUrl());
+      enriched.associateWithDroplet(droplet.id);
 
       log.info("provisionDroplet -> local container", {
         name: droplet.name,
@@ -289,7 +294,7 @@ export function createComputeProviderLocalFactory(
 
       await spawnVM({
         droplet: droplet as unknown as Record<string, unknown>,
-        userData: provisioningData.userData,
+        userData: enriched.userData,
         vmImage: opts.vmImage,
         containerMode: opts.containerMode,
         containerImage: opts.containerImage,

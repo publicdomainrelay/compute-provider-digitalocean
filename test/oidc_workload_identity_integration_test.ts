@@ -3,7 +3,7 @@ import {
   createOidcIssuer,
   ProvisioningData,
   OIDCToken,
-} from "@publicdomainrelay/oidc-issuer";
+} from "@publicdomainrelay/oidc-issuer-hono";
 
 const SSH_KEYGEN_RETRIES = 5;
 const SSHD_START_MS = 2000;

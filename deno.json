@@ -11,7 +11,7 @@
     "./lib/compute-provider-local",
     "./lib/compute-provider-digitalocean",
     "./lib/rbac-atproto",
-    "./lib/oidc-issuer",
+    "./lib/oidc-issuer-hono",
     "./lib/hono-factory-compute-provider-local",
     "./lib/hono-factory-compute-provider-digitalocean",
     "./lib/qemu-standalone",

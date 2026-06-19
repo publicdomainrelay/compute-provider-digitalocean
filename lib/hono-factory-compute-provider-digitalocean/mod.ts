@@ -1,9 +1,10 @@
 import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
+import type { Hono } from "hono";
 import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
 import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
-import { createOidcIssuer, ProvisioningData } from "@publicdomainrelay/oidc-issuer";
+import { createOidcIssuer, createOidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-hono";
 
 export interface DropletCreateRequest {
   name: string;
@@ -78,6 +79,8 @@ export function createComputeProviderDigitalOceanFactory(
 
   const dropletsByActx = new Map<string, Map<number, Droplet>>();
 
+  const oidcProvisioningEnricher = createOidcProvisioningEnricher(getIssuerUrl);
+
   function getDropletsMap(actx: string): Map<number, Droplet> {
     let m = dropletsByActx.get(actx);
     if (!m) { m = new Map(); dropletsByActx.set(actx, m); }
@@ -115,7 +118,7 @@ export function createComputeProviderDigitalOceanFactory(
         await next();
       });
 
-      app.route("/", oidcIssuer.app);
+      app.route("/", oidcIssuer.app as unknown as Hono);
 
       app.use("/v2/account", async (c, next) => {
         try {
@@ -175,9 +178,9 @@ export function createComputeProviderDigitalOceanFactory(
           const actx = c.get("actx");
           log.info("droplets.create -> DO proxy", { name: body.name, actx });
 
-          const provisioningData = await ProvisioningData.create(actx, body.user_data ?? null, getIssuerUrl());
-          body.user_data = provisioningData.userData;
-          provisioningData.associateWithDroplet(body.name);
+          const enriched = await oidcProvisioningEnricher.enrich(body.user_data ?? "", actx, getIssuerUrl());
+          body.user_data = enriched.userData;
+          enriched.associateWithDroplet(body.name);
 
           const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets`, {
             method: "POST",

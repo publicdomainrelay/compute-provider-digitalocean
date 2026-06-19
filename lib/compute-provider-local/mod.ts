@@ -5,14 +5,17 @@ import type {
   ComputeProviderCtx,
   DropletSpec,
   ProvisionResult,
+  RbacProvisioner,
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
+import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
+
+// Direct import needed for internal QEMU VM provisioning path.
+// This is not an ABC violation: VM provisioning (QEMU + KVM) fundamentally
+// requires Docker. It is separate from the container management abstraction.
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
-import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
-import { ProvisioningData, configureOidc } from "@publicdomainrelay/oidc-issuer";
-import { configureRbac, type RbacContext } from "@publicdomainrelay/rbac-atproto";
 
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   acceptPathVm?: string;
@@ -28,6 +31,8 @@ export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
     record: Record<string, unknown>,
   ) => Promise<StrongRef>;
   deleteRecord?: (collection: string, rkey: string) => Promise<void>;
+  oidcProvisioner?: OidcProvisioningEnricher;
+  rbacProvisioner?: RbacProvisioner;
 }
 
 type Distro = "fedora" | "ubuntu";
@@ -504,9 +509,10 @@ interface LocalDroplet {
 }
 
 export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
-  const { log, parseAtUri, getAgentDid, getIssuerUrl, createRecord, deleteRecord } = ctx;
-  const backend: ContainerBackend = ctx.containerBackend ??
-    (Deno.build.os === "darwin" ? createContainerBackend() : createDockerBackend());
+  const { log, parseAtUri, getAgentDid, getIssuerUrl, createRecord, deleteRecord, oidcProvisioner, rbacProvisioner } = ctx;
+  const backend: ContainerBackend = ctx.containerBackend ?? (() => {
+    throw new Error("containerBackend is required in ComputeProviderLocalCtx");
+  })();
   const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
   const containerMode = ctx.containerMode ??
     (Deno.env.get("CONTAINER_MODE") === "true" ? "container" : "vm");
@@ -536,15 +542,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     await Deno.mkdir(cacheDir, { recursive: true });
 
     let rbacRef: StrongRef | undefined;
-    if (createRecord) {
-      const rbacCtx: RbacContext = {
-        getAgentDid,
-        getIssuerUrl,
-        createRecord,
-        deleteRecord,
-        parseAtUri,
-        log: (level, msg, meta) => log(level, msg, meta),
-      };
+    if (rbacProvisioner) {
       log("info", "provision rbac write", {
         repo: getAgentDid(),
         actx: agentDidPlc,
@@ -552,10 +550,15 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
         role: vm.role,
         service: getIssuerUrl(),
       });
-      rbacRef = await configureRbac(vm, requesterDid, rbacCtx);
-      log("info", "provision rbac written", { uri: rbacRef.uri });
+      rbacRef = await rbacProvisioner.provision(vm, requesterDid, {
+        getAgentDid,
+        getIssuerUrl,
+        createRecord: createRecord!,
+        parseAtUri,
+      }) as StrongRef | undefined;
+      log("info", "provision rbac written", { uri: rbacRef?.uri });
     } else {
-      log("warn", "provision rbac skipped", { reason: "no createRecord" });
+      log("warn", "provision rbac skipped", { reason: "no rbacProvisioner" });
     }
 
     const droplet: LocalDroplet = {
@@ -568,23 +571,16 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
     const user_data = vm.user_data ?? DEFAULT_USER_DATA;
 
-    // Inject provisioning-token.service + write_files so the container can
-    // exchange its provisioning token for a workload-identity OIDC token.
-    // Bidder calls provision() directly (bypasses HTTP API), so enrichment
-    // must happen here, not only in the hono-factory layer.
-    configureOidc({ getIssuerUrl });
     log("info", "provision token config", {
       teamUuid: agentDidPlc,
       issuerUrl: getIssuerUrl(),
       containerName,
     });
-    const provisioningData = await ProvisioningData.create(
-      agentDidPlc,
-      user_data,
-      getIssuerUrl(),
-    );
-    const enrichedUserData = provisioningData.userData;
-    provisioningData.associateWithDroplet(containerName);
+    const enriched = oidcProvisioner
+      ? await oidcProvisioner.enrich(user_data, agentDidPlc, getIssuerUrl())
+      : { userData: user_data, nonce: "", associateWithDroplet: () => {} };
+    const enrichedUserData = enriched.userData;
+    enriched.associateWithDroplet(containerName);
 
     if (containerMode === "container") {
       log("info", "provisioning container", {

@@ -37,8 +37,3 @@ export interface ContainerBackend {
   /** Start backend daemon if not running. Returns true if now running. */
   ensureRunning(): Promise<boolean>;
 }
-
-/** Auto-detect the right backend for this platform. */
-export function detectBackend(): "docker" | "container" {
-  return Deno.build.os === "darwin" ? "container" : "docker";
-}

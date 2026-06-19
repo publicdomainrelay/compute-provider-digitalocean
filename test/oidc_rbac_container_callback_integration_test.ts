@@ -3,7 +3,7 @@ import {
   createOidcIssuer,
   ProvisioningData,
   OIDCToken,
-} from "@publicdomainrelay/oidc-issuer";
+} from "@publicdomainrelay/oidc-issuer-hono";
 import { runContainer } from "@publicdomainrelay/compute-provider-local";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";

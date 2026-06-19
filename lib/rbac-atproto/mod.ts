@@ -1,4 +1,4 @@
-import type { StrongRef } from "@publicdomainrelay/compute-provider-abc";
+import type { RbacProvisioner, StrongRef } from "@publicdomainrelay/compute-provider-abc";
 import { UnauthorizedException, type AuthToken } from "@publicdomainrelay/oidc-issuer-abc";
 
 const RBAC_NSID = "com.fedproxy.rbac";
@@ -341,4 +341,21 @@ export function checkRBACPolicy(
   throw new UnauthorizedException(
     `no policy covers path='${path}' for sub='${sub}'`,
   );
+}
+
+export function createRbacProvisioner(): RbacProvisioner {
+  return {
+    async provision(vm, requesterDid, ctx) {
+      const rbacCtx: RbacContext = {
+        getAgentDid: ctx.getAgentDid,
+        getIssuerUrl: ctx.getIssuerUrl,
+        createRecord: ctx.createRecord as (
+          collection: string,
+          record: Record<string, unknown>,
+        ) => Promise<StrongRef>,
+        parseAtUri: ctx.parseAtUri,
+      };
+      return configureRbac(vm, requesterDid, rbacCtx);
+    },
+  };
 }

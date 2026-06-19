@@ -1,5 +1,5 @@
 {
-  "name": "@publicdomainrelay/oidc-issuer",
+  "name": "@publicdomainrelay/oidc-issuer-hono",
   "version": "0.0.0",
   "license": "Unlicense",
   "exports": "./mod.ts",

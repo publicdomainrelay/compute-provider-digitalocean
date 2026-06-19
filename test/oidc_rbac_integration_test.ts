@@ -3,7 +3,7 @@ import {
   createOidcIssuer,
   ProvisioningData,
   OIDCToken,
-} from "@publicdomainrelay/oidc-issuer";
+} from "@publicdomainrelay/oidc-issuer-hono";
 import {
   resolvePDS,
   getRBACRecord,

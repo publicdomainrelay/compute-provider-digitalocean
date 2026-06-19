@@ -6,10 +6,10 @@ import type {
   ComputeProviderCtx,
   DropletSpec,
   ProvisionResult,
+  RbacProvisioner,
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
-import { configureRbac, type RbacContext } from "@publicdomainrelay/rbac-atproto";
 
 export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
   getAgentDid: () => string;
@@ -22,6 +22,7 @@ export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
     record: Record<string, unknown>,
   ) => Promise<StrongRef>;
   deleteRecord?: (collection: string, rkey: string) => Promise<void>;
+  rbacProvisioner?: RbacProvisioner;
 }
 
 const RBAC_NSID = "com.fedproxy.rbac";
@@ -43,6 +44,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     parseAtUri,
     createRecord,
     deleteRecord,
+    rbacProvisioner,
   } = ctx;
 
   async function makeDoctx(): Promise<{ teamUuid: string }> {
@@ -122,16 +124,13 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     const doctx = await makeDoctx();
 
     let rbacRef: StrongRef | undefined;
-    if (createRecord) {
-      const rbacCtx: RbacContext = {
+    if (rbacProvisioner) {
+      rbacRef = await rbacProvisioner.provision(vm, requesterDid, {
         getAgentDid,
         getIssuerUrl,
-        createRecord,
-        deleteRecord,
+        createRecord: createRecord!,
         parseAtUri,
-        log: (level, msg, meta) => log(level, msg, meta),
-      };
-      rbacRef = await configureRbac(vm, requesterDid, rbacCtx);
+      }) as StrongRef | undefined;
     }
 
     const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets`, {

@@ -40,6 +40,7 @@
     "issuer-url": {
       "type": "string",
       "env": "ISSUER_URL",
+      "default": "http://localhost:8080",
       "description": "OIDC issuer URL"
     },
     "operator-handle": {

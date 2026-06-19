@@ -10,6 +10,7 @@ import {
   type OIDCTokenData,
   type OidcIssuerOptions,
   type OidcIssuer,
+  type OidcProvisioningEnricher,
   type ProvisioningDataInit,
   type AuthToken,
   UnauthorizedException,
@@ -634,4 +635,22 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
   });
 
   return { app };
+}
+
+export function createOidcProvisioningEnricher(
+  getIssuerUrl: () => string,
+): OidcProvisioningEnricher {
+  return {
+    async enrich(userData: string, teamUuid: string, issuerUrl: string) {
+      configureOidc({ getIssuerUrl });
+      const pd = await ProvisioningData.create(teamUuid, userData, issuerUrl);
+      return {
+        userData: pd.userData,
+        nonce: pd.nonce,
+        associateWithDroplet(dropletId: string): void {
+          pd.associateWithDroplet(dropletId);
+        },
+      };
+    },
+  };
 }
