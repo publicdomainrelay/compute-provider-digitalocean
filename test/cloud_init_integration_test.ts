@@ -7,6 +7,10 @@ const USER_DATA_PATH = new URL("./cloud-init-test.yaml", import.meta.url).pathna
 const CALLBACK_TIMEOUT_MS = 120_000;
 
 Deno.test("[integration] cloud-init posts hostname to test callback server", async () => {
+  if (!Deno.env.get("TEST_CONTAINER")) {
+    console.log("[test] TEST_CONTAINER not set — skipping container test");
+    return;
+  }
   const backend = Deno.build.os === "darwin" ? createContainerBackend() : createDockerBackend();
   const backendReady = await backend.ensureRunning();
   if (!backendReady) {
@@ -56,29 +60,33 @@ Deno.test("[integration] cloud-init posts hostname to test callback server", asy
 
     const containerName = `test-ci-${crypto.randomUUID().slice(0, 8)}`;
 
-    const info = await runContainer(backend, userData, {
-      distro: "ubuntu",
-      containerName,
-    });
-
     try {
-      const timeout = setTimeout(() => {
-        resolveCallback({ hostname: "" });
-      }, CALLBACK_TIMEOUT_MS);
+      const info = await runContainer(backend, userData, {
+        distro: "ubuntu",
+        containerName,
+      });
 
-      const result = await received;
-      clearTimeout(timeout);
+      try {
+        const timeout = setTimeout(() => {
+          resolveCallback({ hostname: "" });
+        }, CALLBACK_TIMEOUT_MS);
 
-      assertEquals(
-        typeof result.hostname,
-        "string",
-        "hostname should be a string",
-      );
-      console.log(
-        `[test] cloud-init callback received: hostname=${result.hostname}`,
-      );
+        const result = await received;
+        clearTimeout(timeout);
+
+        assertEquals(
+          typeof result.hostname,
+          "string",
+          "hostname should be a string",
+        );
+        console.log(
+          `[test] cloud-init callback received: hostname=${result.hostname}`,
+        );
+      } finally {
+        await backend.rm(info.containerName).catch(() => {});
+      }
     } finally {
-      await backend.rm(info.containerName).catch(() => {});
+      await backend.rm(containerName).catch(() => {});
     }
   } finally {
     ac.abort();

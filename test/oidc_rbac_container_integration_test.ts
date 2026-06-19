@@ -54,6 +54,10 @@ async function cleanupContainer(backend: ContainerBackend, containerName: string
 }
 
 Deno.test("[integration] Container receives workload token + RBAC issue", async () => {
+  if (!Deno.env.get("TEST_CONTAINER")) {
+    console.log("[test] TEST_CONTAINER not set — skipping container test");
+    return;
+  }
   const backend: ContainerBackend = Deno.build.os === "darwin"
     ? createContainerBackend()
     : createDockerBackend();

@@ -300,6 +300,7 @@ export async function runContainer(
   if (!ready) {
     await Deno.remove(udFile).catch(() => {});
     await Deno.remove(epFile).catch(() => {});
+    await backend.rm(containerName).catch(() => {});
     throw new Error(
       `SSH not ready within timeout for ${containerName} (ip=${ip})`,
     );
