@@ -1,5 +1,6 @@
 import { Command } from "@publicdomainrelay/cli-args-env";
 import { createStructuredLogger, type LogLevel } from "@publicdomainrelay/logger";
+import { createServe } from "@publicdomainrelay/serve";
 import { createComputeProviderLocalFactory } from "@publicdomainrelay/hono-factory-compute-provider-local";
 import { createComputeProviderDigitalOceanFactory } from "@publicdomainrelay/hono-factory-compute-provider-digitalocean";
 import cliArgsEnv from "./cli-args-env.json" with { type: "json" };
@@ -73,15 +74,18 @@ if (providerMode === "local") {
   app = factory.createApp();
 }
 
+const serve = createServe({ logger: log, tcp: { addr: hostname, port } });
+serve.app.route("/", app as never);
+
 const signalHandler = () => {
   log.info("shutting down");
-  killAll?.().then(() => Deno.exit(0));
+  (killAll?.() ?? Promise.resolve()).then(() => {
+    serve.shutdown();
+    Deno.exit(0);
+  });
 };
 
 Deno.addSignalListener("SIGINT", signalHandler);
 Deno.addSignalListener("SIGTERM", signalHandler);
 
-Deno.serve(
-  { port, hostname, onListen: () => log.info("listening", { port }) },
-  app.fetch,
-);
+await serve.beginServe();

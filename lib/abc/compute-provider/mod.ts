@@ -1,4 +1,4 @@
-import type { Logger } from "@publicdomainrelay/logger";
+import type { StructuredLoggerInterface } from "@publicdomainrelay/logger";
 
 export type StrongRef = { $type: "com.atproto.repo.strongRef"; uri: string; cid: string };
 
@@ -25,9 +25,15 @@ export interface ProvisionResult {
   metadata: Record<string, unknown>;
 }
 
+export interface ComputeAtproto {
+  getAgentDid(): string;
+  createRecord(collection: string, record: Record<string, unknown>): Promise<StrongRef>;
+  deleteRecord(collection: string, rkey: string): Promise<void>;
+}
+
 export interface ComputeProviderCtx {
-  log: Logger;
-  parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
+  logger: StructuredLoggerInterface;
+  atproto: ComputeAtproto;
 }
 
 export interface ComputeProvider {

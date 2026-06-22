@@ -1,6 +1,7 @@
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import type { Logger, LoggerInterface } from "@publicdomainrelay/logger";
+import type { Logger, LoggerInterface, StructuredLoggerInterface } from "@publicdomainrelay/logger";
 import type {
+  ComputeAtproto,
   ComputeProvider,
   ComputeProviderCtx,
   DropletSpec,
@@ -9,28 +10,31 @@ import type {
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
+import { parseAtUri } from "@publicdomainrelay/compute-provider-abc";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
+import type { ServeHandle } from "@publicdomainrelay/serve";
 
 // Direct import needed for internal QEMU VM provisioning path.
 // This is not an ABC violation: VM provisioning (QEMU + KVM) fundamentally
 // requires Docker. It is separate from the container management abstraction.
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
+import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
+
+function didWebToHttps(didOrUrl: string): string {
+  return didOrUrl.startsWith("did:web:") ? "https://" + didOrUrl.slice("did:web:".length) : didOrUrl;
+}
 
 export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
+  serve: ServeHandle;
+  getIssuerUrl: () => string;
   acceptPathVm?: string;
   containerMode?: "vm" | "container";
   vmImage?: string;
   containerImage?: string;
   cacheDir?: string;
   containerBackend?: ContainerBackend;
-  getAgentDid: () => string;
-  getIssuerUrl: () => string;
-  createRecord?: (
-    collection: string,
-    record: Record<string, unknown>,
-  ) => Promise<StrongRef>;
-  deleteRecord?: (collection: string, rkey: string) => Promise<void>;
   oidcProvisioner?: OidcProvisioningEnricher;
   rbacProvisioner?: RbacProvisioner;
 }
@@ -509,10 +513,12 @@ interface LocalDroplet {
 }
 
 export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
-  const { log, parseAtUri, getAgentDid, getIssuerUrl, createRecord, deleteRecord, oidcProvisioner, rbacProvisioner } = ctx;
-  const backend: ContainerBackend = ctx.containerBackend ?? (() => {
-    throw new Error("containerBackend is required in ComputeProviderLocalCtx");
-  })();
+  const { atproto, getIssuerUrl, logger, oidcProvisioner, rbacProvisioner, serve } = ctx;
+  const log: Logger = (level, message, meta) => {
+    logger[level as "info" | "warn" | "error" | "debug"]?.(message, meta);
+  };
+  const backend: ContainerBackend = ctx.containerBackend ??
+    (Deno.build.os === "darwin" ? createContainerBackend() : createDockerBackend());
   const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
   const containerMode = ctx.containerMode ??
     (Deno.env.get("CONTAINER_MODE") === "true" ? "container" : "vm");
@@ -526,6 +532,20 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     Deno.env.get("CACHE_DIR") ??
     defaultCacheDir();
 
+  serve.onConnected((proxyRef) => {
+    const serviceUrl = didWebToHttps(proxyRef);
+    const oidcIssuer = createOidcIssuer({
+      getIssuerUrl,
+      getDroplet: (id: string) => droplets.get(id) as Record<string, unknown> | undefined,
+      serviceUrl,
+      log: (level: string, msg: string, extra?: Record<string, unknown>) => {
+        logger[level as "info" | "warn" | "error" | "debug"]?.(msg, extra);
+      },
+    });
+    serve.app.route("/", oidcIssuer.app as never);
+    logger.info("local oidc issuer mounted", { serviceUrl });
+  });
+
   const droplets = new Map<string, LocalDroplet>();
 
   async function provisionLocal(
@@ -534,7 +554,8 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     spec?: DropletSpec,
   ): Promise<{ result: ProvisionResult; rbacRef?: StrongRef }> {
     const ds = spec ?? dropletSpecFromEnv();
-    const agentDidPlc = getAgentDid().split(":").pop() ?? "unknown";
+    const agentDid = atproto.getAgentDid();
+    const agentDidPlc = agentDid.split(":").pop() ?? "unknown";
     const requesterPlc = requesterDid.split(":").pop() ?? "unknown";
     const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
     const containerName = `pdr-${requesterPlc}-${rfpRkey}-${shortUuid()}`;
@@ -543,22 +564,23 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
     let rbacRef: StrongRef | undefined;
     if (rbacProvisioner) {
-      log("info", "provision rbac write", {
-        repo: getAgentDid(),
+      logger.info("provision rbac write", {
+        repo: agentDid,
         actx: agentDidPlc,
         requesterPlc,
         role: vm.role,
         service: getIssuerUrl(),
       });
       rbacRef = await rbacProvisioner.provision(vm, requesterDid, {
-        getAgentDid,
+        getAgentDid: () => atproto.getAgentDid(),
         getIssuerUrl,
-        createRecord: createRecord!,
+        createRecord: (collection: string, record: Record<string, unknown>) =>
+          atproto.createRecord(collection, record),
         parseAtUri,
       }) as StrongRef | undefined;
-      log("info", "provision rbac written", { uri: rbacRef?.uri });
+      logger.info("provision rbac written", { uri: rbacRef?.uri });
     } else {
-      log("warn", "provision rbac skipped", { reason: "no rbacProvisioner" });
+      logger.warn("provision rbac skipped", { reason: "no rbacProvisioner" });
     }
 
     const droplet: LocalDroplet = {
@@ -571,7 +593,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
     const user_data = vm.user_data ?? DEFAULT_USER_DATA;
 
-    log("info", "provision token config", {
+    logger.info("provision token config", {
       teamUuid: agentDidPlc,
       issuerUrl: getIssuerUrl(),
       containerName,
@@ -583,7 +605,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     enriched.associateWithDroplet(containerName);
 
     if (containerMode === "container") {
-      log("info", "provisioning container", {
+      logger.info("provisioning container", {
         containerName,
         image: containerImage,
       });
@@ -644,20 +666,21 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
   async function destroyLocal(id: string | number): Promise<void> {
     const name = String(id);
-    log("info", "destroying container", { containerName: name });
+    logger.info("destroying container", { containerName: name });
     await backend.kill(name).catch(() => {});
     await backend.rm(name).catch(() => {});
     droplets.delete(name);
   }
 
   async function createBidConfig(nowIso: string): Promise<StrongRef> {
-    if (createRecord) {
-      return createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
+    const agentDid = atproto.getAgentDid();
+    try {
+      return atproto.createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
         $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
         accept_path: acceptPathVm,
         issuer_uri: getIssuerUrl(),
         to_issue: "exchange-custom-droplet-oidc-poc",
-        actx: getAgentDid().split(":").slice(-1)[0],
+        actx: agentDid.split(":").slice(-1)[0],
         actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
         token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
         url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
@@ -665,10 +688,12 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
         subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
         createdAt: nowIso,
       });
+    } catch {
+      /* fallback no-op ref */
     }
     return {
       $type: "com.atproto.repo.strongRef",
-      uri: `at://${getAgentDid()}/${COMPUTE_CONFIG_WIF_SIMPLE_NSID}/self`,
+      uri: `at://${agentDid}/${COMPUTE_CONFIG_WIF_SIMPLE_NSID}/self`,
       cid: "local-noop",
     };
   }
@@ -712,9 +737,9 @@ export function createLocalComputeProvider(
 
     async destroy(id: string | number): Promise<void> {
       const rbacRef = rbacByProvider.get(id);
-      if (rbacRef && ctx.deleteRecord) {
-        const { collection, rkey } = ctx.parseAtUri(rbacRef.uri);
-        await ctx.deleteRecord(collection, rkey).catch(() => {});
+      if (rbacRef) {
+        const { collection, rkey } = parseAtUri(rbacRef.uri);
+        await ctx.atproto.deleteRecord(collection, rkey).catch(() => {});
         rbacByProvider.delete(id);
       }
       await destroyLocal(id);

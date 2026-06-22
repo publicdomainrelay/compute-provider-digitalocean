@@ -25,6 +25,8 @@
     "@publicdomainrelay/container-backend-container": "./lib/container-backend-container/mod.ts",
     "@publicdomainrelay/hono-error-middleware": "../typescript-helpers/lib/hono-error-middleware/mod.ts",
     "@publicdomainrelay/logger": "../typescript-helpers/lib/logger/mod.ts",
+    "@publicdomainrelay/serve": "../typescript-helpers/lib/serve/mod.ts",
+    "@publicdomainrelay/hostname-helpers": "../typescript-helpers/lib/hostname-helpers/mod.ts",
     "@publicdomainrelay/atproto-repo-deno": "../hono-pds/lib/atproto-repo-deno/mod.ts",
     "@publicdomainrelay/hono-factory-atproto-repo-deno": "../hono-pds/lib/hono-factory-atproto-repo-deno/mod.ts",
     "@atproto/crypto": "npm:@atproto/crypto@^0.5.0",

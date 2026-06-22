@@ -1,7 +1,8 @@
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
 import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
-import type { Logger } from "@publicdomainrelay/logger";
+import type { StructuredLoggerInterface } from "@publicdomainrelay/logger";
 import type {
+  ComputeAtproto,
   ComputeProvider,
   ComputeProviderCtx,
   DropletSpec,
@@ -10,22 +11,18 @@ import type {
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
+import { parseAtUri } from "@publicdomainrelay/compute-provider-abc";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
+import type { ServeHandle } from "@publicdomainrelay/serve";
 
 export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
-  getAgentDid: () => string;
+  serve: ServeHandle;
   getIssuerUrl: () => string;
-  acceptPathVm: string;
-  digitaloceanBaseUrl: string;
+  acceptPathVm?: string;
+  digitaloceanBaseUrl?: string;
   doToken: string;
-  createRecord?: (
-    collection: string,
-    record: Record<string, unknown>,
-  ) => Promise<StrongRef>;
-  deleteRecord?: (collection: string, rkey: string) => Promise<void>;
   rbacProvisioner?: RbacProvisioner;
 }
-
-const RBAC_NSID = "com.fedproxy.rbac";
 
 const COMPUTE_CONFIG_WIF_SIMPLE_NSID =
   "com.publicdomainrelay.temp.compute.config.wif.simple";
@@ -33,26 +30,42 @@ const DEFAULT_DIGITALOCEAN_BASE_URL = "https://droplet-oidc.its1337.com";
 const DEFAULT_ACCEPT_PATH_VM =
   "/root/secrets/publicdomainrelay.com/market/accept.json";
 
+function didWebToHttps(didOrUrl: string): string {
+  return didOrUrl.startsWith("did:web:") ? "https://" + didOrUrl.slice("did:web:".length) : didOrUrl;
+}
+
 export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOceanCtx) {
   const {
-    getAgentDid,
+    atproto,
     getIssuerUrl,
-    log,
+    logger,
     acceptPathVm = DEFAULT_ACCEPT_PATH_VM,
     digitaloceanBaseUrl = DEFAULT_DIGITALOCEAN_BASE_URL,
     doToken,
-    parseAtUri,
-    createRecord,
-    deleteRecord,
     rbacProvisioner,
+    serve,
   } = ctx;
+
+  serve.onConnected((proxyRef) => {
+    const serviceUrl = didWebToHttps(proxyRef);
+    const oidcIssuer = createOidcIssuer({
+      getIssuerUrl,
+      getDroplet: (_id: string) => undefined,
+      serviceUrl,
+      log: (level: string, msg: string, extra?: Record<string, unknown>) => {
+        logger[level as "info" | "warn" | "error" | "debug"]?.(msg, extra);
+      },
+    });
+    serve.app.route("/", oidcIssuer.app as never);
+    logger.info("do oidc issuer mounted", { serviceUrl });
+  });
 
   async function makeDoctx(): Promise<{ teamUuid: string }> {
     const res = await fetch(`${digitaloceanBaseUrl}/v2/account`, {
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${doToken}` },
     });
     const json = await res.json();
-    log("debug", "DO /v2/account response", { account: json });
+    logger.debug("DO /v2/account response", { account: json });
     if (res.status >= 400) throw new Error(`DO /v2/account ${res.status}: ${JSON.stringify(json)}`);
     const uuid = json.account.team.uuid;
     return { teamUuid: uuid };
@@ -81,8 +94,9 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
 
   async function createBidConfig(nowIso: string): Promise<StrongRef> {
     const doctx = await makeDoctx();
-    if (createRecord) {
-      return createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
+    const agentDid = atproto.getAgentDid();
+    try {
+      return atproto.createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
         $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
         accept_path: acceptPathVm,
         issuer_uri: getIssuerUrl(),
@@ -95,10 +109,12 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
         subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
         createdAt: nowIso,
       });
+    } catch {
+      /* fallback no-op ref */
     }
     return {
       $type: "com.atproto.repo.strongRef",
-      uri: `at://${getAgentDid()}/${COMPUTE_CONFIG_WIF_SIMPLE_NSID}/self`,
+      uri: `at://${agentDid}/${COMPUTE_CONFIG_WIF_SIMPLE_NSID}/self`,
       cid: "do-noop",
     };
   }
@@ -119,16 +135,17 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
       with_droplet_agent: true,
       tags: [`oidc-sub:plc:${requesterPlc}`, `oidc-sub:role:${vm.role}`],
     };
-    log("info", "droplet request", { name, requesterDid, droplet: body });
+    logger.info("droplet request", { name, requesterDid, droplet: body });
 
     const doctx = await makeDoctx();
 
     let rbacRef: StrongRef | undefined;
     if (rbacProvisioner) {
       rbacRef = await rbacProvisioner.provision(vm, requesterDid, {
-        getAgentDid,
+        getAgentDid: () => atproto.getAgentDid(),
         getIssuerUrl,
-        createRecord: createRecord!,
+        createRecord: (collection: string, record: Record<string, unknown>) =>
+          atproto.createRecord(collection, record),
         parseAtUri,
       }) as StrongRef | undefined;
     }
@@ -143,23 +160,23 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
       body: JSON.stringify(body),
     });
     const json = await res.json();
-    log("info", "droplet created", { name, requesterDid, status: res.status });
+    logger.info("droplet created", { name, requesterDid, status: res.status });
     if (res.status >= 400) throw new Error(`DO /v2/droplets ${res.status}: ${JSON.stringify(json)}`);
     return { json, rbacRef };
   }
 
   async function deleteDroplet(dropletId: number | string, reason: string): Promise<void> {
-    log("info", "deleting droplet", { dropletId, reason });
+    logger.info("deleting droplet", { dropletId, reason });
     const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets/${dropletId}`, {
       method: "DELETE",
       headers: { "Authorization": `Bearer ${doToken}` },
     });
     if (res.status >= 400 && res.status !== 404) {
       const body = await res.text();
-      log("error", "DO delete droplet failed", { dropletId, status: res.status, body });
+      logger.error("DO delete droplet failed", { dropletId, status: res.status, body });
       return;
     }
-    log("info", "droplet deleted", { dropletId, reason });
+    logger.info("droplet deleted", { dropletId, reason });
   }
 
   return {
@@ -201,9 +218,9 @@ export function createDigitalOceanComputeProvider(
 
     async destroy(id: string | number): Promise<void> {
       const rbacRef = rbacByProvider.get(id);
-      if (rbacRef && ctx.deleteRecord) {
-        const { collection, rkey } = ctx.parseAtUri(rbacRef.uri);
-        await ctx.deleteRecord(collection, rkey).catch(() => {});
+      if (rbacRef) {
+        const { collection, rkey } = parseAtUri(rbacRef.uri);
+        await ctx.atproto.deleteRecord(collection, rkey).catch(() => {});
         rbacByProvider.delete(id);
       }
       await deleteDroplet(id, "vm.delete event");
