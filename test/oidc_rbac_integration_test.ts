@@ -13,13 +13,6 @@ import { Hono } from "hono";
 
 const RBAC_NSID = "com.fedproxy.rbac";
 
-function allocatePort(): number {
-  const listener = Deno.listen({ port: 0, hostname: "127.0.0.1" });
-  const port = listener.addr.port;
-  try { listener.close(); } catch { /* ok */ }
-  return port;
-}
-
 Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
   const tmpDir = await Deno.makeTempDir();
   const hostKeyPath = `${tmpDir}/ssh_host_ed25519_key`;
@@ -31,24 +24,111 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     stdout: "null", stderr: "null",
   }).output();
 
-  // ── 2. Allocate ports ─────────────────────────────────────────────
-  const sshPort = allocatePort();
-  const plcPort = allocatePort();
-  const pdsPort = allocatePort();
-  const issuerPort = allocatePort();
-
-  const pdsUrl = `http://127.0.0.1:${pdsPort}`;
-  const issuerUrl = `http://127.0.0.1:${issuerPort}`;
-  const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
-
-  // ── 3. Setup test data ────────────────────────────────────────────
+  // ── 2. Setup test data ────────────────────────────────────────────
   const actxUuid = crypto.randomUUID();
   const actxDid = `did:plc:${actxUuid}`;
   const requesterPlc = crypto.randomUUID().split("-")[0];
   const roleName = `ex-${actxUuid}-${requesterPlc}-worker`;
   const subject = `actx:${actxUuid}:plc:${requesterPlc}:role:worker`;
 
-  const rbacRecord = {
+  let issuerUrl = "";
+
+  // ── 3. Start PLC directory (port 0) ───────────────────────────────
+  const { app: plcApp, registerDid } = createPlcDirectory();
+  const plcAc = new AbortController();
+  const { promise: plcPortReady, resolve: resolvePlcPort } = Promise.withResolvers<number>();
+  Deno.serve(
+    { port: 0, hostname: "127.0.0.1", signal: plcAc.signal, onListen: (addr) => resolvePlcPort((addr as Deno.NetAddr).port) },
+    plcApp.fetch,
+  );
+
+  // ── 4. Start mock PDS (handler captures rbacRecord by reference) ──
+  let rbacRecord: Record<string, unknown> = {};
+  const pdsApp = new Hono();
+  pdsApp.get("/xrpc/com.atproto.repo.listRecords", (c) => {
+    const repo = c.req.query("repo");
+    const collection = c.req.query("collection");
+    if (repo === actxDid && collection === RBAC_NSID) {
+      return c.json({
+        records: [{ uri: `at://${actxDid}/${RBAC_NSID}/test`, value: rbacRecord }],
+      });
+    }
+    return c.json({ records: [] });
+  });
+  const pdsAc = new AbortController();
+  const { promise: pdsPortReady, resolve: resolvePdsPort } = Promise.withResolvers<number>();
+  Deno.serve(
+    { port: 0, hostname: "127.0.0.1", signal: pdsAc.signal, onListen: (addr) => resolvePdsPort((addr as Deno.NetAddr).port) },
+    pdsApp.fetch,
+  );
+
+  // ── 5. Resolve ports + build non-issuer URLs ──────────────────────
+  const plcPort = await plcPortReady;
+  const pdsPort = await pdsPortReady;
+  const pdsUrl = `http://127.0.0.1:${pdsPort}`;
+  const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
+  registerDid(actxDid, pdsUrl);
+
+  // ── 6. sshd — hold listener until sshd confirms ready ─────────────
+  const sshLn = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const sshPort = (sshLn.addr as Deno.NetAddr).port;
+  const sshd = new Deno.Command("/usr/sbin/sshd", {
+    args: [
+      "-D", "-p", String(sshPort), "-h", hostKeyPath,
+      "-f", "/dev/null", "-o", "StrictModes no", "-o", "UsePAM no",
+      "-o", "PidFile none", "-o", "MaxStartups 10",
+    ],
+    stdout: "null", stderr: "null",
+  });
+  const sshdProc = sshd.spawn();
+
+  let sshdReady = false;
+  for (let i = 0; i < 10; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    try {
+      const { code } = await new Deno.Command("ssh-keyscan", {
+        args: ["-t", "ed25519", "-p", String(sshPort), "127.0.0.1"],
+        stdout: "null", stderr: "null",
+      }).output();
+      if (code === 0) { sshdReady = true; break; }
+    } catch { /* retry */ }
+  }
+  try { sshLn.close(); } catch {/* ok */}
+  if (!sshdReady) {
+    plcAc.abort(); pdsAc.abort();
+    try { sshdProc.kill("SIGTERM"); } catch {/* ignore */}
+    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
+    throw new Error("sshd not reachable");
+  }
+
+  // ── 7. Start compute provider (port 0, bind 127.0.0.1) ────────────
+  const dropletById = new Map<string, Record<string, unknown>>();
+  const dropletId = crypto.randomUUID().slice(0, 8);
+  const dropletRecord = {
+    id: dropletId,
+    networks: { v4: [{ ip_address: "127.0.0.1", type: "public" }] },
+    tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
+  };
+  dropletById.set(dropletId, dropletRecord);
+
+  const { app } = createOidcIssuer({
+    getIssuerUrl: () => issuerUrl,
+    getDroplet: (id) => dropletById.get(id),
+    serviceUrl: issuerUrl,
+    plcDirectoryUrl,
+  });
+
+  const issuerAc = new AbortController();
+  const { promise: issuerPortReady, resolve: resolveIssuerPort } = Promise.withResolvers<number>();
+  Deno.serve(
+    { port: 0, hostname: "127.0.0.1", signal: issuerAc.signal, onListen: (addr) => resolveIssuerPort((addr as Deno.NetAddr).port) },
+    app.fetch,
+  );
+  const issuerPort = await issuerPortReady;
+  issuerUrl = `http://127.0.0.1:${issuerPort}`;
+
+  // ── 8. Build rbacRecord (now that issuerUrl is known) ─────────────
+  rbacRecord = {
     $type: RBAC_NSID,
     protects: {
       [roleName]: { service: issuerUrl, scope: "droplets.wid" },
@@ -89,86 +169,6 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     custom_claims_roles_index: { job_workflow_ref: {} },
     createdAt: new Date().toISOString(),
   };
-
-  // ── 4. Start PLC directory ────────────────────────────────────────
-  const { app: plcApp, registerDid } = createPlcDirectory();
-  const plcAc = new AbortController();
-  const plcServer = Deno.serve(
-    { port: plcPort, hostname: "127.0.0.1", signal: plcAc.signal },
-    plcApp.fetch,
-  );
-  registerDid(actxDid, pdsUrl);
-
-  // ── 5. Start mock PDS (listRecords endpoint only) ─────────────────
-  const pdsApp = new Hono();
-  pdsApp.get("/xrpc/com.atproto.repo.listRecords", (c) => {
-    const repo = c.req.query("repo");
-    const collection = c.req.query("collection");
-    if (repo === actxDid && collection === RBAC_NSID) {
-      return c.json({
-        records: [{ uri: `at://${actxDid}/${RBAC_NSID}/test`, value: rbacRecord }],
-      });
-    }
-    return c.json({ records: [] });
-  });
-  const pdsAc = new AbortController();
-  const pdsServer = Deno.serve(
-    { port: pdsPort, hostname: "127.0.0.1", signal: pdsAc.signal },
-    pdsApp.fetch,
-  );
-
-  // ── 6. Start sshd ─────────────────────────────────────────────────
-  const sshd = new Deno.Command("/usr/sbin/sshd", {
-    args: [
-      "-D", "-p", String(sshPort), "-h", hostKeyPath,
-      "-f", "/dev/null", "-o", "StrictModes no", "-o", "UsePAM no",
-      "-o", "PidFile none", "-o", "MaxStartups 10",
-    ],
-    stdout: "null", stderr: "null",
-  });
-  const sshdProc = sshd.spawn();
-
-  let sshdReady = false;
-  for (let i = 0; i < 10; i++) {
-    await new Promise((r) => setTimeout(r, 200));
-    try {
-      const { code } = await new Deno.Command("ssh-keyscan", {
-        args: ["-t", "ed25519", "-p", String(sshPort), "127.0.0.1"],
-        stdout: "null", stderr: "null",
-      }).output();
-      if (code === 0) { sshdReady = true; break; }
-    } catch { /* retry */ }
-  }
-  if (!sshdReady) {
-    plcAc.abort(); pdsAc.abort();
-    try { sshdProc.kill("SIGTERM"); } catch {/* ignore */}
-    await plcServer.finished; await pdsServer.finished;
-    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
-    throw new Error("sshd not reachable");
-  }
-
-  // ── 7. Start compute provider ─────────────────────────────────────
-  const dropletById = new Map<string, Record<string, unknown>>();
-  const dropletId = crypto.randomUUID().slice(0, 8);
-  const dropletRecord = {
-    id: dropletId,
-    networks: { v4: [{ ip_address: "127.0.0.1", type: "public" }] },
-    tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
-  };
-  dropletById.set(dropletId, dropletRecord);
-
-  const { app } = createOidcIssuer({
-    getIssuerUrl: () => issuerUrl,
-    getDroplet: (id) => dropletById.get(id),
-    serviceUrl: issuerUrl,
-    plcDirectoryUrl,
-  });
-
-  const issuerAc = new AbortController();
-  const issuerServer = Deno.serve(
-    { port: issuerPort, hostname: "127.0.0.1", signal: issuerAc.signal },
-    app.fetch,
-  );
 
   try {
     // ── 8. Verify PLC resolution works ──────────────────────────────
@@ -305,11 +305,8 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     assertEquals(reValidated.actx, actxUuid);
   } finally {
     issuerAc.abort();
-    await issuerServer.finished;
     plcAc.abort();
-    await plcServer.finished;
     pdsAc.abort();
-    await pdsServer.finished;
     try { sshdProc.kill("SIGTERM"); } catch {/* ignore */}
     await sshdProc.status;
     await Deno.remove(tmpDir, { recursive: true }).catch(() => {});

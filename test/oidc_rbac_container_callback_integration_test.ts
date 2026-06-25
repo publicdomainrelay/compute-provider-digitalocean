@@ -15,22 +15,11 @@ import { Hono } from "hono";
 const RBAC_NSID = "com.fedproxy.rbac";
 const CALLBACK_TIMEOUT_MS = 300_000;
 
-function allocatePort(): number {
-  const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
-  const p = l.addr.port;
-  try { l.close(); } catch {/* ok */}
-  return p;
-}
-
 async function cleanupContainer(backend: ContainerBackend, containerName: string): Promise<void> {
   await backend.rm(containerName).catch(() => {});
 }
 
 Deno.test("[integration] Container receives workload token via callback + RBAC issue", async () => {
-  if (!Deno.env.get("TEST_CONTAINER")) {
-    console.log("[test] TEST_CONTAINER not set — skipping container test");
-    return;
-  }
   const backend: ContainerBackend = Deno.build.os === "darwin"
     ? createContainerBackend()
     : createDockerBackend();
@@ -40,26 +29,89 @@ Deno.test("[integration] Container receives workload token via callback + RBAC i
     return;
   }
 
-  // Infrastructure ports
-  const plcPort = allocatePort();
-  const pdsPort = allocatePort();
-  const issuerPort = allocatePort();
-  const callbackPort = allocatePort();
+  const cleanups: Array<() => void> = [];
 
-  const pdsUrl = `http://127.0.0.1:${pdsPort}`;
-  const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
-  const gatewayIp = await backend.defaultGateway();
-  // Issuer bound to 0.0.0.0 so container can reach it at gateway IP
-  const issuerUrl = `http://${gatewayIp}:${issuerPort}`;
-
-  // Test data
+  // Test data (doesn't depend on ports)
   const actxUuid = crypto.randomUUID();
   const actxDid = `did:plc:${actxUuid}`;
   const requesterPlc = crypto.randomUUID().split("-")[0];
   const roleName = `ex-${actxUuid}-${requesterPlc}-worker`;
   const subject = `actx:${actxUuid}:plc:${requesterPlc}:role:worker`;
 
-  const rbacRecord = {
+  // Forward-referenced let bindings resolved after server startup
+  let issuerUrl = "";
+
+  // ── callback server ──────────────────────────────────────────────────
+  let resolveCallback: (v: { token: string }) => void;
+  const callbackPromise = new Promise<{ token: string }>((resolve) => {
+    resolveCallback = resolve;
+  });
+  const callbackAc = new AbortController();
+  const { promise: cbPortReady, resolve: resolveCbPort } = Promise.withResolvers<number>();
+  Deno.serve(
+    { port: 0, hostname: "0.0.0.0", signal: callbackAc.signal, onListen: (addr) => resolveCbPort((addr as Deno.NetAddr).port) },
+    async (req) => {
+      const url = new URL(req.url);
+      if (req.method === "POST" && url.pathname === "/token") {
+        const body = await req.json() as { token: string };
+        resolveCallback(body);
+        return new Response("ok");
+      }
+      return new Response("not found", { status: 404 });
+    },
+  );
+
+  // ── PLC directory ────────────────────────────────────────────────────
+  const { app: plcApp, registerDid } = createPlcDirectory();
+  const plcAc = new AbortController();
+  const { promise: plcPortReady, resolve: resolvePlcPort } = Promise.withResolvers<number>();
+  Deno.serve({ port: 0, hostname: "127.0.0.1", signal: plcAc.signal, onListen: (addr) => resolvePlcPort((addr as Deno.NetAddr).port) }, plcApp.fetch);
+
+  // ── mock PDS (handler captures rbacRecord by reference) ──────────────
+  let rbacRecord: Record<string, unknown> = {};
+  const pdsApp = new Hono();
+  pdsApp.get("/xrpc/com.atproto.repo.listRecords", (c) => {
+    if (c.req.query("repo") === actxDid && c.req.query("collection") === RBAC_NSID) {
+      return c.json({ records: [{ uri: `at://${actxDid}/${RBAC_NSID}/test`, value: rbacRecord }] });
+    }
+    return c.json({ records: [] });
+  });
+  const pdsAc = new AbortController();
+  const { promise: pdsPortReady, resolve: resolvePdsPort } = Promise.withResolvers<number>();
+  Deno.serve({ port: 0, hostname: "127.0.0.1", signal: pdsAc.signal, onListen: (addr) => resolvePdsPort((addr as Deno.NetAddr).port) }, pdsApp.fetch);
+
+  // ── resolve ports + build non-issuer URLs ────────────────────────────
+  const callbackPort = await cbPortReady;
+  const plcPort = await plcPortReady;
+  const pdsPort = await pdsPortReady;
+  const pdsUrl = `http://127.0.0.1:${pdsPort}`;
+  const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
+  const gatewayIp = await backend.defaultGateway();
+  registerDid(actxDid, pdsUrl);
+
+  // ── droplet ──────────────────────────────────────────────────────────
+  const dropletId = crypto.randomUUID().slice(0, 8);
+  const droplet: Record<string, unknown> = {
+    id: dropletId,
+    networks: { v4: [{ ip_address: "127.0.0.1", type: "public" }] },
+    tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
+  };
+
+  // ── OIDC issuer (issuerUrl uses let — resolved after server starts) ──
+  const { app: oidcApp } = createOidcIssuer({
+    getIssuerUrl: () => issuerUrl,
+    getDroplet: (id) => id === dropletId ? droplet : undefined,
+    serviceUrl: issuerUrl,
+    plcDirectoryUrl,
+  });
+  const issuerAc = new AbortController();
+  const { promise: issuerPortReady, resolve: resolveIssuerPort } = Promise.withResolvers<number>();
+  Deno.serve({ port: 0, hostname: "0.0.0.0", signal: issuerAc.signal, onListen: (addr) => resolveIssuerPort((addr as Deno.NetAddr).port) }, oidcApp.fetch);
+  const issuerPort = await issuerPortReady;
+  issuerUrl = `http://${gatewayIp}:${issuerPort}`;
+
+  // ── rbacRecord (now that issuerUrl is known) ─────────────────────────
+  rbacRecord = {
     $type: RBAC_NSID,
     protects: { [roleName]: { service: issuerUrl, scope: "droplets.wid" } },
     roles: {
@@ -99,60 +151,7 @@ Deno.test("[integration] Container receives workload token via callback + RBAC i
     createdAt: new Date().toISOString(),
   };
 
-  // Callback server — container POSTs token here after provisioning
-  let resolveCallback: (v: { token: string }) => void;
-  const callbackPromise = new Promise<{ token: string }>((resolve) => {
-    resolveCallback = resolve;
-  });
-
-  const callbackAc = new AbortController();
-  const callbackServer = Deno.serve(
-    { port: callbackPort, hostname: "0.0.0.0", signal: callbackAc.signal },
-    async (req) => {
-      const url = new URL(req.url);
-      if (req.method === "POST" && url.pathname === "/token") {
-        const body = await req.json() as { token: string };
-        resolveCallback(body);
-        return new Response("ok");
-      }
-      return new Response("not found", { status: 404 });
-    },
-  );
-
-  // PLC directory
-  const { app: plcApp, registerDid } = createPlcDirectory();
-  const plcAc = new AbortController();
-  Deno.serve({ port: plcPort, hostname: "127.0.0.1", signal: plcAc.signal }, plcApp.fetch);
-  registerDid(actxDid, pdsUrl);
-
-  // Mock PDS
-  const pdsApp = new Hono();
-  pdsApp.get("/xrpc/com.atproto.repo.listRecords", (c) => {
-    if (c.req.query("repo") === actxDid && c.req.query("collection") === RBAC_NSID) {
-      return c.json({ records: [{ uri: `at://${actxDid}/${RBAC_NSID}/test`, value: rbacRecord }] });
-    }
-    return c.json({ records: [] });
-  });
-  const pdsAc = new AbortController();
-  Deno.serve({ port: pdsPort, hostname: "127.0.0.1", signal: pdsAc.signal }, pdsApp.fetch);
-
-  // Droplet — mutable, updated via onIp
-  const dropletId = crypto.randomUUID().slice(0, 8);
-  const droplet: Record<string, unknown> = {
-    id: dropletId,
-    networks: { v4: [{ ip_address: "127.0.0.1", type: "public" }] },
-    tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
-  };
-
-  // OIDC issuer (bind 0.0.0.0 so container can reach)
-  const { app } = createOidcIssuer({
-    getIssuerUrl: () => issuerUrl,
-    getDroplet: (id) => id === dropletId ? droplet : undefined,
-    serviceUrl: issuerUrl,
-    plcDirectoryUrl,
-  });
-  const issuerAc = new AbortController();
-  Deno.serve({ port: issuerPort, hostname: "0.0.0.0", signal: issuerAc.signal }, app.fetch);
+  // ── rbacRecord is now fully built ────────────────────────────────────
 
   let containerName = "";
 

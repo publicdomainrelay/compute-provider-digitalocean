@@ -17,13 +17,6 @@ const TOKEN_PATH = "/root/secrets/digitalocean.com/serviceaccount/token";
 const POLL_TIMEOUT_MS = 180_000;
 const POLL_INTERVAL_MS = 2_000;
 
-function allocatePort(): number {
-  const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
-  const p = l.addr.port;
-  try { l.close(); } catch {/* ok */}
-  return p;
-}
-
 async function execInContainer(
   backend: ContainerBackend,
   containerName: string,
@@ -54,10 +47,6 @@ async function cleanupContainer(backend: ContainerBackend, containerName: string
 }
 
 Deno.test("[integration] Container receives workload token + RBAC issue", async () => {
-  if (!Deno.env.get("TEST_CONTAINER")) {
-    console.log("[test] TEST_CONTAINER not set — skipping container test");
-    return;
-  }
   const backend: ContainerBackend = Deno.build.os === "darwin"
     ? createContainerBackend()
     : createDockerBackend();
@@ -67,25 +56,65 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
     return;
   }
 
-  // Infrastructure ports. Compute provider binds 0.0.0.0 so containers reach it
-  // at the bridge gateway (queried from backend). All other infra on 127.0.0.1.
-  const plcPort = allocatePort();
-  const pdsPort = allocatePort();
-  const issuerPort = allocatePort();
-
-  const pdsUrl = `http://127.0.0.1:${pdsPort}`;
-  const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
-  const gatewayIp = await backend.defaultGateway();
-  const issuerUrl = `http://${gatewayIp}:${issuerPort}`;
-
-  // Test data
+  // Test data (doesn't depend on ports)
   const actxUuid = crypto.randomUUID();
   const actxDid = `did:plc:${actxUuid}`;
   const requesterPlc = crypto.randomUUID().split("-")[0];
   const roleName = `ex-${actxUuid}-${requesterPlc}-worker`;
   const subject = `actx:${actxUuid}:plc:${requesterPlc}:role:worker`;
 
-  const rbacRecord = {
+  let issuerUrl = "";
+
+  // ── PLC directory ────────────────────────────────────────────────────
+  const { app: plcApp, registerDid } = createPlcDirectory();
+  const plcAc = new AbortController();
+  const { promise: plcPortReady, resolve: resolvePlcPort } = Promise.withResolvers<number>();
+  Deno.serve({ port: 0, hostname: "127.0.0.1", signal: plcAc.signal, onListen: (addr) => resolvePlcPort((addr as Deno.NetAddr).port) }, plcApp.fetch);
+
+  // ── mock PDS (handler captures rbacRecord by reference) ──────────────
+  let rbacRecord: Record<string, unknown> = {};
+  const pdsApp = new Hono();
+  pdsApp.get("/xrpc/com.atproto.repo.listRecords", (c) => {
+    if (c.req.query("repo") === actxDid && c.req.query("collection") === RBAC_NSID) {
+      return c.json({ records: [{ uri: `at://${actxDid}/${RBAC_NSID}/test`, value: rbacRecord }] });
+    }
+    return c.json({ records: [] });
+  });
+  const pdsAc = new AbortController();
+  const { promise: pdsPortReady, resolve: resolvePdsPort } = Promise.withResolvers<number>();
+  Deno.serve({ port: 0, hostname: "127.0.0.1", signal: pdsAc.signal, onListen: (addr) => resolvePdsPort((addr as Deno.NetAddr).port) }, pdsApp.fetch);
+
+  // ── resolve ports + build non-issuer URLs ────────────────────────────
+  const plcPort = await plcPortReady;
+  const pdsPort = await pdsPortReady;
+  const pdsUrl = `http://127.0.0.1:${pdsPort}`;
+  const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
+  const gatewayIp = await backend.defaultGateway();
+  registerDid(actxDid, pdsUrl);
+
+  // ── droplet ──────────────────────────────────────────────────────────
+  const dropletId = crypto.randomUUID().slice(0, 8);
+  const droplet: Record<string, unknown> = {
+    id: dropletId,
+    networks: { v4: [{ ip_address: "127.0.0.1", type: "public" }] },
+    tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
+  };
+
+  // ── OIDC issuer (issuerUrl uses let — resolved after server starts) ──
+  const { app } = createOidcIssuer({
+    getIssuerUrl: () => issuerUrl,
+    getDroplet: (id) => id === dropletId ? droplet : undefined,
+    serviceUrl: issuerUrl,
+    plcDirectoryUrl,
+  });
+  const issuerAc = new AbortController();
+  const { promise: issuerPortReady, resolve: resolveIssuerPort } = Promise.withResolvers<number>();
+  Deno.serve({ port: 0, hostname: "0.0.0.0", signal: issuerAc.signal, onListen: (addr) => resolveIssuerPort((addr as Deno.NetAddr).port) }, app.fetch);
+  const issuerPort = await issuerPortReady;
+  issuerUrl = `http://${gatewayIp}:${issuerPort}`;
+
+  // ── rbacRecord (now that issuerUrl is known) ─────────────────────────
+  rbacRecord = {
     $type: RBAC_NSID,
     protects: { [roleName]: { service: issuerUrl, scope: "droplets.wid" } },
     roles: {
@@ -124,41 +153,6 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
     custom_claims_roles_index: { job_workflow_ref: {} },
     createdAt: new Date().toISOString(),
   };
-
-  // PLC directory
-  const { app: plcApp, registerDid } = createPlcDirectory();
-  const plcAc = new AbortController();
-  Deno.serve({ port: plcPort, hostname: "127.0.0.1", signal: plcAc.signal }, plcApp.fetch);
-  registerDid(actxDid, pdsUrl);
-
-  // Mock PDS (listRecords only)
-  const pdsApp = new Hono();
-  pdsApp.get("/xrpc/com.atproto.repo.listRecords", (c) => {
-    if (c.req.query("repo") === actxDid && c.req.query("collection") === RBAC_NSID) {
-      return c.json({ records: [{ uri: `at://${actxDid}/${RBAC_NSID}/test`, value: rbacRecord }] });
-    }
-    return c.json({ records: [] });
-  });
-  const pdsAc = new AbortController();
-  Deno.serve({ port: pdsPort, hostname: "127.0.0.1", signal: pdsAc.signal }, pdsApp.fetch);
-
-  // Droplet record — mutable, updated via onIp when container gets its real IP.
-  const dropletId = crypto.randomUUID().slice(0, 8);
-  const droplet: Record<string, unknown> = {
-    id: dropletId,
-    networks: { v4: [{ ip_address: "127.0.0.1", type: "public" }] },
-    tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
-  };
-
-  // Compute provider (bind 0.0.0.0)
-  const { app } = createOidcIssuer({
-    getIssuerUrl: () => issuerUrl,
-    getDroplet: (id) => id === dropletId ? droplet : undefined,
-    serviceUrl: issuerUrl,
-    plcDirectoryUrl,
-  });
-  const issuerAc = new AbortController();
-  Deno.serve({ port: issuerPort, hostname: "0.0.0.0", signal: issuerAc.signal }, app.fetch);
 
   let containerName = "";
   try {

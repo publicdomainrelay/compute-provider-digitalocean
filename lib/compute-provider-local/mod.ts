@@ -122,6 +122,33 @@ export async function pollSsh(
   return false;
 }
 
+/**
+ * Readiness probe that runs INSIDE the guest via `backend.exec`, checking that
+ * sshd is listening on `port`. Unlike pollSsh, this never opens a host->guest
+ * TCP socket, so it works on backends whose guest network the host cannot route
+ * to from Deno.connect (e.g. macOS Apple `container` vmnet, which returns
+ * "No route to host").
+ */
+export async function pollSshExec(
+  backend: ContainerBackend,
+  containerName: string,
+  port: number = SSH_DEFAULT_PORT,
+  timeoutMs: number = POLL_TIMEOUT_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  const probe = `ss -H -tln 2>/dev/null | grep -q ':${port} ' || pgrep -x sshd >/dev/null 2>&1`;
+  while (Date.now() < deadline) {
+    try {
+      const { code } = await backend.exec(containerName, ["bash", "-c", probe]);
+      if (code === 0) return true;
+    } catch {
+      // container not up yet; keep polling
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
 function imageTag(distro: Distro): string {
   return `container-runner-${distro}:latest`;
 }
@@ -305,7 +332,7 @@ export async function runContainer(
   if (opts.onIp) await opts.onIp(ip, containerName);
 
   console.log("==> Waiting for SSH...");
-  const ready = await pollSsh(ip, 22);
+  const ready = await pollSshExec(backend, containerName, 22);
   if (!ready) {
     await Deno.remove(udFile).catch(() => {});
     await Deno.remove(epFile).catch(() => {});

@@ -7,10 +7,6 @@ const USER_DATA_PATH = new URL("./cloud-init-test.yaml", import.meta.url).pathna
 const CALLBACK_TIMEOUT_MS = 120_000;
 
 Deno.test("[integration] cloud-init posts hostname to test callback server", async () => {
-  if (!Deno.env.get("TEST_CONTAINER")) {
-    console.log("[test] TEST_CONTAINER not set — skipping container test");
-    return;
-  }
   const backend = Deno.build.os === "darwin" ? createContainerBackend() : createDockerBackend();
   const backendReady = await backend.ensureRunning();
   if (!backendReady) {
