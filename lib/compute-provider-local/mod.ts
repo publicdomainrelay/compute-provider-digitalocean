@@ -239,11 +239,17 @@ async function copySystemctlShim(
   distro: Distro,
   cacheDir: string,
 ): Promise<string> {
+  const dst = `${cacheDir}/systemctl-shim-${distro}.ts`;
+  // Check cache first — the caller may have pre-seeded the file to avoid
+  // a runtime fetch (e.g. in compiled apps where fetch(file://…) may fail).
+  try {
+    const existing = await Deno.readTextFile(dst);
+    if (existing.length > 0) return dst;
+  } catch { /* not cached yet */ }
   const systemctlShimSrc = new URL(
     "./systemctl-shim.ts",
     import.meta.url,
   );
-  const dst = `${cacheDir}/systemctl-shim-${distro}.ts`;
   const resp = await fetch(systemctlShimSrc);
   if (!resp.ok) throw new Error(`Failed to load systemctl-shim: ${resp.status}`);
   const content = await resp.text();
