@@ -67,11 +67,21 @@ async function rawHttpFetch(
       const t = new Uint8Array(acc.length + c.length);
       t.set(acc); t.set(c, acc.length); return t;
     }, new Uint8Array(0));
-    const raw = new TextDecoder().decode(rawBytes);
-    const headerEnd = raw.indexOf("\r\n\r\n");
-    if (headerEnd < 0) return new Response(raw, { status: 502 });
-    const headerSection = raw.slice(0, headerEnd);
-    let bodySection = raw.slice(headerEnd + 4);
+
+    // Header section is ASCII; find the \r\n\r\n separator on raw bytes so a
+    // multi-byte UTF-8 body never gets sliced mid-codepoint below.
+    const CRLFCRLF = new Uint8Array([13, 10, 13, 10]);
+    let headerEnd = -1;
+    for (let i = 0; i + 4 <= rawBytes.length; i++) {
+      if (
+        rawBytes[i] === CRLFCRLF[0] && rawBytes[i + 1] === CRLFCRLF[1] &&
+        rawBytes[i + 2] === CRLFCRLF[2] && rawBytes[i + 3] === CRLFCRLF[3]
+      ) { headerEnd = i; break; }
+    }
+    if (headerEnd < 0) return new Response(new TextDecoder().decode(rawBytes), { status: 502 });
+
+    const headerSection = new TextDecoder("ascii").decode(rawBytes.slice(0, headerEnd));
+    let bodyBytes = rawBytes.slice(headerEnd + 4);
     const lines = headerSection.split("\r\n");
     const status = parseInt(lines[0].split(" ")[1] || "500");
     const respHeaders = new Headers();
@@ -86,21 +96,33 @@ async function rawHttpFetch(
       }
     }
     if (isChunked) {
-      let out = "";
-      while (bodySection.length > 0) {
-        const crlf = bodySection.indexOf("\r\n");
+      const out: number[] = [];
+      let offset = 0;
+      while (offset < bodyBytes.length) {
+        let crlf = -1;
+        for (let i = offset; i + 2 <= bodyBytes.length; i++) {
+          if (bodyBytes[i] === 13 && bodyBytes[i + 1] === 10) { crlf = i; break; }
+        }
         if (crlf < 0) break;
-        const size = parseInt(bodySection.slice(0, crlf), 16);
-        if (size === 0) break;
-        out += bodySection.slice(crlf + 2, crlf + 2 + size);
-        bodySection = bodySection.slice(crlf + 2 + size + 2);
+        const sizeLine = new TextDecoder("ascii").decode(bodyBytes.slice(offset, crlf));
+        const size = parseInt(sizeLine, 16);
+        if (!size) break;
+        const chunkStart = crlf + 2;
+        for (let i = chunkStart; i < chunkStart + size; i++) out.push(bodyBytes[i]);
+        offset = chunkStart + size + 2;
       }
-      bodySection = out;
+      bodyBytes = new Uint8Array(out);
     }
-    return new Response(bodySection, { status, headers: respHeaders });
+    return new Response(bodyBytes, { status, headers: respHeaders });
   } finally {
     try { conn.close(); } catch { /* ok */ }
   }
+}
+
+function isLocalhostSubdomainWithPort(host: string): boolean {
+  if (!host.includes(":")) return false;
+  const hostname = host.slice(0, host.lastIndexOf(":"));
+  return hostname === "localhost" || hostname.endsWith(".localhost");
 }
 
 function installLocalhostDNS(): void {
@@ -111,9 +133,9 @@ function installLocalhostDNS(): void {
     // Match both https:// and http:// — the test interceptor may have already
     // downgraded the scheme before we see it.
     const m = url.match(/^https?:\/\/([^/]+)(\/.*)?$/);
-    if (m && (m[1].endsWith(".localhost") || m[1] === "localhost" || m[1].includes(".localhost:"))) {
+    if (m && isLocalhostSubdomainWithPort(m[1])) {
       const host = m[1];
-      const port = host.includes(":") ? parseInt(host.split(":").pop()!) : 443;
+      const port = parseInt(host.split(":").pop()!);
       return rawHttpFetch(port, host, m[2] ?? "/", input, init);
     }
     return realFetch(input as string | URL | Request, init);
@@ -195,23 +217,31 @@ export function createDockerBackend(): ContainerBackend {
 
       if (await this.isRunning()) return true;
 
-      // Try to start the docker daemon
+      // Try to start the docker daemon. On Windows this must run inside
+      // WSL2 (same as cli()) — a bare "sudo" binary does not exist on the
+      // host and Deno.Command would reject with NotFound.
+      const isWindows = Deno.build.os === "windows";
       for (const startCmd of [
         ["sudo", "service", "docker", "start"],
         ["sudo", "systemctl", "start", "docker"],
       ]) {
-        const c = new Deno.Command(startCmd[0], {
-          args: startCmd.slice(1),
-          stdout: "null",
-          stderr: "null",
-        });
-        const { code } = await c.output();
-        if (code === 0) {
-          // Wait a moment for the daemon to be ready
-          for (let i = 0; i < 10; i++) {
-            if (await this.isRunning()) return true;
-            await new Promise((r) => setTimeout(r, 500));
+        const bin = isWindows ? "wsl" : startCmd[0];
+        const binArgs = isWindows ? startCmd : startCmd.slice(1);
+        try {
+          const c = new Deno.Command(bin, {
+            args: binArgs,
+            stdout: "null",
+            stderr: "null",
+          });
+          const { code } = await c.output();
+          if (code === 0) {
+            for (let i = 0; i < 10; i++) {
+              if (await this.isRunning()) return true;
+              await new Promise((r) => setTimeout(r, 500));
+            }
           }
+        } catch (err) {
+          console.error(`docker start command failed: ${bin} ${binArgs.join(" ")}: ${err}`);
         }
       }
 
