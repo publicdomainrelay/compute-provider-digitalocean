@@ -22,6 +22,107 @@ function cli(
   }));
 }
 
+// ── *.localhost DNS resolution for Windows ───────────────────────────────
+// macOS/Linux system resolvers treat *.localhost as loopback. Windows does
+// not. Deno's fetch() ignores manual Host headers, so we use Deno.connect
+// + raw HTTP/1.1 to reach 127.0.0.1 while preserving the Host header for
+// dispatcher subdomain routing.
+
+let installedLocalhostDNS = false;
+
+async function rawHttpFetch(
+  port: number, host: string, path: string,
+  input: string | URL | Request, init?: RequestInit,
+): Promise<Response> {
+  const u = typeof input === "string" ? new URL(input)
+    : input instanceof URL ? input : new URL(input.url);
+  const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+  const reqHeaders = new Headers(input instanceof Request ? input.headers : init?.headers);
+  reqHeaders.set("Host", host);
+  const bodyStr = init?.body as string | undefined
+    ?? (input instanceof Request ? await input.text().catch(() => "") : "");
+  if (bodyStr && !reqHeaders.has("content-type")) reqHeaders.set("content-type", "application/json");
+  if (bodyStr && !reqHeaders.has("content-length")) {
+    reqHeaders.set("content-length", String(new TextEncoder().encode(bodyStr).length));
+  }
+
+  const headerLines = [`${method} ${u.pathname}${u.search} HTTP/1.1`];
+  for (const [k, v] of reqHeaders) headerLines.push(`${k}: ${v}`);
+  headerLines.push("connection: close");
+  const reqStr = headerLines.join("\r\n") + "\r\n\r\n";
+
+  const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+  try {
+    await conn.write(new TextEncoder().encode(reqStr));
+    if (bodyStr) await conn.write(new TextEncoder().encode(bodyStr));
+    const chunks: Uint8Array[] = [];
+    const readBuf = new Uint8Array(8192);
+    while (true) {
+      let n: number | null = null;
+      try { n = await conn.read(readBuf); } catch { break; }
+      if (n === null || n === 0) break;
+      chunks.push(readBuf.slice(0, n));
+    }
+    const rawBytes = chunks.reduce((acc, c) => {
+      const t = new Uint8Array(acc.length + c.length);
+      t.set(acc); t.set(c, acc.length); return t;
+    }, new Uint8Array(0));
+    const raw = new TextDecoder().decode(rawBytes);
+    const headerEnd = raw.indexOf("\r\n\r\n");
+    if (headerEnd < 0) return new Response(raw, { status: 502 });
+    const headerSection = raw.slice(0, headerEnd);
+    let bodySection = raw.slice(headerEnd + 4);
+    const lines = headerSection.split("\r\n");
+    const status = parseInt(lines[0].split(" ")[1] || "500");
+    const respHeaders = new Headers();
+    let isChunked = false;
+    for (let i = 1; i < lines.length; i++) {
+      const ci = lines[i].indexOf(": ");
+      if (ci >= 0) {
+        const k = lines[i].slice(0, ci).toLowerCase();
+        const v = lines[i].slice(ci + 2);
+        respHeaders.set(k, v);
+        if (k === "transfer-encoding" && v === "chunked") isChunked = true;
+      }
+    }
+    if (isChunked) {
+      let out = "";
+      while (bodySection.length > 0) {
+        const crlf = bodySection.indexOf("\r\n");
+        if (crlf < 0) break;
+        const size = parseInt(bodySection.slice(0, crlf), 16);
+        if (size === 0) break;
+        out += bodySection.slice(crlf + 2, crlf + 2 + size);
+        bodySection = bodySection.slice(crlf + 2 + size + 2);
+      }
+      bodySection = out;
+    }
+    return new Response(bodySection, { status, headers: respHeaders });
+  } finally {
+    try { conn.close(); } catch { /* ok */ }
+  }
+}
+
+function installLocalhostDNS(): void {
+  if (installedLocalhostDNS || Deno.build.os !== "windows") return;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    let url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    // Match both https:// and http:// — the test interceptor may have already
+    // downgraded the scheme before we see it.
+    const m = url.match(/^https?:\/\/([^/]+)(\/.*)?$/);
+    if (m && (m[1].endsWith(".localhost") || m[1] === "localhost" || m[1].includes(".localhost:"))) {
+      const host = m[1];
+      const port = host.includes(":") ? parseInt(host.split(":").pop()!) : 443;
+      return rawHttpFetch(port, host, m[2] ?? "/", input, init);
+    }
+    return realFetch(input as string | URL | Request, init);
+  }) as typeof fetch;
+  installedLocalhostDNS = true;
+}
+
+// ── Backend factory ──────────────────────────────────────────────────────
+
 export function createDockerBackend(): ContainerBackend {
   return {
     type: "docker",
@@ -88,6 +189,10 @@ export function createDockerBackend(): ContainerBackend {
     },
 
     async ensureRunning(): Promise<boolean> {
+      // Windows: *.localhost DNS doesn't resolve. Install fetch interceptor
+      // so services discoverable via subdomain.localhost are reachable.
+      installLocalhostDNS();
+
       if (await this.isRunning()) return true;
 
       // Try to start the docker daemon
