@@ -89,7 +89,28 @@ export function createDockerBackend(): ContainerBackend {
 
     async ensureRunning(): Promise<boolean> {
       if (await this.isRunning()) return true;
-      console.error("docker not running — start docker daemon first");
+
+      // Try to start the docker daemon
+      for (const startCmd of [
+        ["sudo", "service", "docker", "start"],
+        ["sudo", "systemctl", "start", "docker"],
+      ]) {
+        const c = new Deno.Command(startCmd[0], {
+          args: startCmd.slice(1),
+          stdout: "null",
+          stderr: "null",
+        });
+        const { code } = await c.output();
+        if (code === 0) {
+          // Wait a moment for the daemon to be ready
+          for (let i = 0; i < 10; i++) {
+            if (await this.isRunning()) return true;
+            await new Promise((r) => setTimeout(r, 500));
+          }
+        }
+      }
+
+      console.error("docker not running — could not start daemon");
       return false;
     },
   };
