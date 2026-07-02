@@ -5,8 +5,13 @@ function cli(
   args: string[],
   opts?: { inherit?: boolean },
 ): Promise<CliResult> {
-  const cmd = new Deno.Command("docker", {
-    args,
+  // On Windows, docker lives inside WSL2. Prepend "wsl docker" automatically.
+  const isWindows = Deno.build.os === "windows";
+  const binArgs = isWindows ? ["docker", ...args] : args;
+  const bin = isWindows ? "wsl" : "docker";
+
+  const cmd = new Deno.Command(bin, {
+    args: binArgs,
     stdout: opts?.inherit ? "inherit" : "piped",
     stderr: opts?.inherit ? "inherit" : "piped",
   });
