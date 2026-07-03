@@ -521,7 +521,7 @@ async function raiseIfUnauthorized(
 }
 
 export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
-  const { getIssuerUrl, getDroplet, serviceUrl } = opts;
+  const { getIssuerUrl, getDroplet } = opts;
   const plcDirectoryUrl = opts.plcDirectoryUrl ?? "https://plc.directory";
   const log = opts.log ?? noopLogger;
 

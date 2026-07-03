@@ -44,7 +44,8 @@ export interface ProvisioningDataInit {
 export interface OidcIssuerOptions {
   getIssuerUrl: () => string;
   getDroplet: (id: string) => Record<string, unknown> | undefined;
-  serviceUrl: string;
+  /** @deprecated No longer used — getIssuerUrl() provides the live URL. */
+  serviceUrl?: string;
   plcDirectoryUrl?: string;
   log?: Logger;
   onIssuerUrl?: (baseUrl: string) => void | Promise<void>;
