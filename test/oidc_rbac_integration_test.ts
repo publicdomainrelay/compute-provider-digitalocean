@@ -80,6 +80,7 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     ],
     stdout: "null", stderr: "null",
   });
+  try { sshLn.close(); } catch {/* ok */}
   const sshdProc = sshd.spawn();
 
   let sshdReady = false;
@@ -93,7 +94,6 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
       if (code === 0) { sshdReady = true; break; }
     } catch { /* retry */ }
   }
-  try { sshLn.close(); } catch {/* ok */}
   if (!sshdReady) {
     plcAc.abort(); pdsAc.abort();
     try { sshdProc.kill("SIGTERM"); } catch {/* ignore */}

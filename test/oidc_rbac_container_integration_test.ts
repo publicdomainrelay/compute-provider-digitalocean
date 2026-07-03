@@ -10,6 +10,7 @@ import { createContainerBackend } from "@publicdomainrelay/container-backend-con
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { getRBACRecord } from "@publicdomainrelay/rbac-atproto";
 import { createPlcDirectory } from "./plc_directory.ts";
+import { getHostLanIp } from "./host_lan_ip.ts";
 import { Hono } from "hono";
 
 const RBAC_NSID = "com.fedproxy.rbac";
@@ -89,7 +90,7 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
   const pdsPort = await pdsPortReady;
   const pdsUrl = `http://127.0.0.1:${pdsPort}`;
   const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
-  const gatewayIp = await backend.defaultGateway();
+  const gatewayIp = await getHostLanIp();
   registerDid(actxDid, pdsUrl);
 
   // ── droplet ──────────────────────────────────────────────────────────

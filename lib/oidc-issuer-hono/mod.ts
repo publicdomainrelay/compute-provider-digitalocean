@@ -558,7 +558,7 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
     try {
       const token = extractBearer(c.req.header("Authorization"));
       const authToken = await raiseIfUnauthorized(
-        serviceUrl,
+        getIssuerUrl(),
         "droplets.wid",
         token,
         "/v1/oidc/issue",
