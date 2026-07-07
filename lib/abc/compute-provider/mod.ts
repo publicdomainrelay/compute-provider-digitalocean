@@ -57,12 +57,11 @@ export interface ComputeProvider {
 export type ComputeProviderMode = "local" | "digitalocean";
 
 export function parseAtUri(uri: string): { repo: string; collection: string; rkey: string } {
-  const u = new URL(uri);
-  const parts = u.pathname.split("/").filter(Boolean);
+  const parts = uri.slice("at://".length).split("/");
   return {
-    repo: `${u.protocol}//${u.host}`,
-    collection: parts[0] ?? "",
-    rkey: parts[1] ?? "",
+    repo: parts[0],
+    collection: parts[1] ?? "",
+    rkey: parts[2] ?? "",
   };
 }
 
