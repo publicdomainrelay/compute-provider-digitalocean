@@ -10,7 +10,7 @@ import type {
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
-import { parseAtUri } from "@publicdomainrelay/compute-provider-abc";
+import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
 import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";

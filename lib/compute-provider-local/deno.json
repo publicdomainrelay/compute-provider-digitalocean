@@ -11,6 +11,7 @@
   },
   "imports": {
     "@publicdomainrelay/compute-provider-abc": "jsr:@publicdomainrelay/compute-provider-abc@^0",
+    "@publicdomainrelay/atproto-helpers": "jsr:@publicdomainrelay/atproto-helpers@^0",
     "@publicdomainrelay/oidc-issuer-hono": "jsr:@publicdomainrelay/oidc-issuer-hono@^0",
     "@publicdomainrelay/serve": "jsr:@publicdomainrelay/serve@^0",
     "yaml": "npm:yaml@^2.7.0"

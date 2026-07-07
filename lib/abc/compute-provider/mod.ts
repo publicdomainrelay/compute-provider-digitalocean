@@ -56,15 +56,6 @@ export interface ComputeProvider {
 
 export type ComputeProviderMode = "local" | "digitalocean";
 
-export function parseAtUri(uri: string): { repo: string; collection: string; rkey: string } {
-  const parts = uri.slice("at://".length).split("/");
-  return {
-    repo: parts[0],
-    collection: parts[1] ?? "",
-    rkey: parts[2] ?? "",
-  };
-}
-
 export interface RbacProvisioner {
   provision(vm: { role: string }, requesterDid: string, ctx: {
     getAgentDid: () => string;

@@ -11,7 +11,7 @@ import type {
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
-import { parseAtUri } from "@publicdomainrelay/compute-provider-abc";
+import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 import type { ServeHandle } from "@publicdomainrelay/serve";
 
