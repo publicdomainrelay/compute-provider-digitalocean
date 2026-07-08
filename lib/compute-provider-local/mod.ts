@@ -104,6 +104,25 @@ function shortUuid(): string {
   return crypto.randomUUID().slice(0, 8);
 }
 
+/**
+ * Short, filesystem/container-name-safe id derived from an arbitrary string.
+ * did:plc keys are already short (~24 chars); did:web hostnames can be
+ * arbitrarily long (e.g. a did:key-derived subdomain), which overflows the
+ * container runtime's 64-char name limit. Hash down to a fixed 12 hex chars.
+ */
+function shortId(value: string): string {
+  let h1 = 0xdeadbeef ^ value.length;
+  let h2 = 0x41c6ce57 ^ value.length;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0").slice(0, 4);
+}
+
 export async function pollSsh(
   host: string,
   port: number = SSH_DEFAULT_PORT,
@@ -590,9 +609,18 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     const ds = spec ?? dropletSpecFromEnv();
     const agentDid = atproto.getAgentDid();
     const agentDidPlc = agentDid.split(":").pop() ?? "unknown";
+    // did:plc keys are short and stay human-legible in the container name;
+    // did:web (e.g. a did:key-derived subdomain) can be arbitrarily long, so
+    // it gets hashed down instead of overflowing the container name limit.
+    // Full value: used for RBAC/OIDC subject matching, must stay exactly
+    // what rbacProvisioner.provision() derives from requesterDid elsewhere.
     const requesterPlc = requesterDid.split(":").pop() ?? "unknown";
+    // Shortened: container-name-safe only. did:plc keys are short and stay
+    // human-legible; did:web (e.g. a did:key-derived subdomain) can be
+    // arbitrarily long and overflows the container runtime's 64-char limit.
+    const containerRequesterPlc = requesterPlc.length > 20 ? shortId(requesterPlc) : requesterPlc;
     const rfpRkey = (vm._uri ?? "").split("/")[4] ?? "unknown";
-    const containerName = `pdr-${requesterPlc}-${rfpRkey}-${shortUuid()}`;
+    const containerName = `pdr-${containerRequesterPlc}-${rfpRkey}-${shortUuid()}`;
 
     await Deno.mkdir(cacheDir, { recursive: true });
 
