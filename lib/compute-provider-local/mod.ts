@@ -554,7 +554,8 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     (Deno.build.os === "darwin" ? createContainerBackend() : createDockerBackend());
   const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
   const containerMode = ctx.containerMode ??
-    (Deno.env.get("CONTAINER_MODE") === "true" ? "container" : "vm");
+    (Deno.env.get("CONTAINER_MODE") === "true" ? "container" : undefined) ??
+    "container";
   const vmImage = ctx.vmImage ??
     Deno.env.get("VM_IMAGE") ??
     "atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner";
@@ -731,6 +732,11 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     };
   }
 
+  async function ensureImage(distro: Distro = "ubuntu"): Promise<void> {
+    if (containerMode !== "container") return;
+    await buildContainerImage(backend, distro);
+  }
+
   return {
     provisionLocal,
     destroyLocal,
@@ -739,6 +745,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       injectAcceptBundle(userData, bundle, acceptPathVm),
     getDroplet: (id: string): Record<string, unknown> | undefined =>
       droplets.get(id) as Record<string, unknown> | undefined,
+    ensureImage,
   };
 }
 
@@ -751,6 +758,7 @@ export function createLocalComputeProvider(
     createBidConfig,
     injectAcceptBundle: injectBundle,
     getDroplet,
+    ensureImage,
   } = createComputeProviderLocal(ctx);
 
   const rbacByProvider = new Map<string | number, StrongRef>();
@@ -781,5 +789,6 @@ export function createLocalComputeProvider(
     createBidConfig,
     injectAcceptBundle: injectBundle,
     getDroplet,
-  };
+    ensureImage,
+  } as ComputeProvider & { ensureImage(): Promise<void> };
 }
