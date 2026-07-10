@@ -737,7 +737,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
   async function createBidConfig(nowIso: string): Promise<StrongRef> {
     const agentDid = atproto.getAgentDid();
     try {
-      return atproto.createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
+      return await atproto.createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
         $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
         accept_path: acceptPathVm,
         issuer_uri: getIssuerUrl(),
