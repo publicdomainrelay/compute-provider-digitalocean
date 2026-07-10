@@ -94,29 +94,19 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
 
   async function createBidConfig(nowIso: string): Promise<StrongRef> {
     const doctx = await makeDoctx();
-    const agentDid = atproto.getAgentDid();
-    try {
-      return atproto.createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
-        $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
-        accept_path: acceptPathVm,
-        issuer_uri: getIssuerUrl(),
-        to_issue: "exchange-custom-droplet-oidc-poc",
-        actx: doctx.teamUuid,
-        actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
-        token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
-        url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
-        url_route: "/v1/oidc/issue",
-        subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
-        createdAt: nowIso,
-      });
-    } catch {
-      /* fallback no-op ref */
-    }
-    return {
-      $type: "com.atproto.repo.strongRef",
-      uri: `at://${agentDid}/${COMPUTE_CONFIG_WIF_SIMPLE_NSID}/self`,
-      cid: "do-noop",
-    };
+    return atproto.createRecord(COMPUTE_CONFIG_WIF_SIMPLE_NSID, {
+      $type: COMPUTE_CONFIG_WIF_SIMPLE_NSID,
+      accept_path: acceptPathVm,
+      issuer_uri: getIssuerUrl(),
+      to_issue: "exchange-custom-droplet-oidc-poc",
+      actx: doctx.teamUuid,
+      actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
+      token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
+      url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
+      url_route: "/v1/oidc/issue",
+      subject: "actx:{actx}:plc:{did-plc-key}:role:{role}",
+      createdAt: nowIso,
+    });
   }
 
   async function createDroplet(
