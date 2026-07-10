@@ -585,8 +585,8 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     Deno.env.get("CACHE_DIR") ??
     defaultCacheDir();
 
-  serve.onConnected((proxyRef) => {
-    const serviceUrl = didWebToHttps(proxyRef);
+  serve.onConnected((ingressRef) => {
+    const serviceUrl = didWebToHttps(ingressRef);
     const oidcIssuer = createOidcIssuer({
       getIssuerUrl,
       getDroplet: (id: string) => droplets.get(id) as Record<string, unknown> | undefined,

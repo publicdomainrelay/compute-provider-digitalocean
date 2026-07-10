@@ -1,14 +1,14 @@
 // End-to-end: get a real shell into a real container over the xrpc relay
 // tunnel, with the guest provisioned ONLY from cloud-init user_data (no
 // container exec / apt-get / hand-built sshd). This folds the intent of the old
-// did-key-relay ssh_container_e2e_test.ts into the cloud-init-driven
-// compute-provider harness (see oidc_rbac_container_callback_integration_test.ts).
+// ssh e2e test into the cloud-init-driven compute-provider harness
+// (see oidc_rbac_container_callback_integration_test.ts).
 //
-//   real ssh -> ProxyCommand (websocat) -> did-key-relay relay
+//   real ssh -> ProxyCommand (websocat) -> xrpc relay
 //     <- (outbound) in-guest tunnel-subscriber -> 127.0.0.1:22 sshd
 //
 // The guest pulls the tunnel-subscriber at boot via `deno run jsr:...` from a
-// local hono-jsr registry that serves the fresh did-key-relay workspace. This
+// local hono-jsr registry that serves the fresh xrpc relay workspace. This
 // is the fedproxy-client replacement: ssh-over-websocket rides the xrpc relay.
 //
 //   deno test -A test/oidc_rbac_container_ssh_integration_test.ts
@@ -19,15 +19,15 @@ import { runContainer } from "@publicdomainrelay/compute-provider-local";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
-import { createRelayFactory } from "@publicdomainrelay/hono-factory-did-key-relay-relayer-xrpc";
+import { createRelayFactory } from "@publicdomainrelay/hono-factory-did-key-ingress-proxy-xrpc";
 import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
 import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
-import { didToSubdomain, TUNNEL_NSID } from "@publicdomainrelay/did-key-relay-common";
+import { didToSubdomain, TUNNEL_NSID } from "@publicdomainrelay/did-key-ingress-proxy-common";
 import { buildTunnelUserData } from "@publicdomainrelay/cloud-init-common";
 
 const SSH_READY_TIMEOUT_MS = 300_000;
 
-// Org root holds every @publicdomainrelay/* workspace package (did-key-relay,
+// Org root holds every @publicdomainrelay/* workspace package (did-key-ingress-proxy,
 // typescript-helpers, ...). The registry serves the subscriber's full dep
 // closure fresh from source.
 const ORG_ROOT_DIR = new URL("../../", import.meta.url).pathname;
@@ -98,7 +98,7 @@ Deno.test("[integration] real shell into a cloud-init guest over the xrpc relay 
 
     // Guest cloud-init: sshd@127.0.0.1:22 + tunnel-subscriber dialing the relay.
     const userData = buildTunnelUserData({
-      dispatcherHost: `${gatewayIp}:${relayPort}`,
+      ingressProxyHost: `${gatewayIp}:${relayPort}`,
       audHost: "localhost",
       privateKeyHex,
       jsrUrl: `${gatewayIp}:${registryPort}`,

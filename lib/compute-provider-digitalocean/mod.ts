@@ -46,8 +46,8 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     serve,
   } = ctx;
 
-  serve.onConnected((proxyRef) => {
-    const serviceUrl = didWebToHttps(proxyRef);
+  serve.onConnected((ingressRef) => {
+    const serviceUrl = didWebToHttps(ingressRef);
     const oidcIssuer = createOidcIssuer({
       getIssuerUrl,
       getDroplet: (_id: string) => undefined,
