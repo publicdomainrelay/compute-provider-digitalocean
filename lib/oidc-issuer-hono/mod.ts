@@ -330,6 +330,62 @@ ExecStart=/usr/local/bin/provisioning-token.sh
 WantedBy=multi-user.target
 `;
 
+    const onNetworkScriptContent = `#!/usr/bin/env bash
+set -euo pipefail
+# Wait for accept.json (injected by bidder) and OIDC token (from provisioning-token.service)
+ACCEPT_JSON=/root/secrets/publicdomainrelay.com/market/accept.json
+for i in \$(seq 1 30); do
+  [ -f "\${ACCEPT_JSON}" ] && [ -f /root/secrets/digitalocean.com/serviceaccount/token ] && break
+  sleep 2
+done
+[ ! -f "\${ACCEPT_JSON}" ] && { echo "accept.json not found, skipping onNetwork"; exit 0; }
+TOKEN=\$(cat /root/secrets/digitalocean.com/serviceaccount/token 2>/dev/null)
+BASE_URL=\$(cat /root/secrets/digitalocean.com/serviceaccount/base_url 2>/dev/null)
+[ -z "\${TOKEN}" ] && { echo "no OIDC token, skipping onNetwork"; exit 0; }
+[ -z "\${BASE_URL}" ] && BASE_URL="https://xrpc.fedproxy.com"
+
+ACCEPT_URI=\$(jq -r '.accept.uri // empty' "\${ACCEPT_JSON}" 2>/dev/null)
+ACCEPT_CID=\$(jq -r '.accept.cid // empty' "\${ACCEPT_JSON}" 2>/dev/null)
+[ -z "\${ACCEPT_URI}" ] && { echo "no accept URI in accept.json"; exit 1; }
+
+FQDN=\$(hostname 2>/dev/null || echo "guest")
+curl -sf --retry 10 --retry-delay 5 --retry-max-time 120 \\
+  -X POST "\${BASE_URL}/v1/on-network" \\
+  -H "Authorization: Bearer \${TOKEN}" \\
+  -H "Content-Type: application/json" \\
+  -d "\$(jq -n --arg au "\${ACCEPT_URI}" --arg ac "\${ACCEPT_CID}" --arg addr "\${FQDN}" \\
+    '{acceptUri: \$au, acceptCid: \$ac, address: \$addr, createdAt: (now | todate)}')"
+echo "onNetwork reported OK"
+`;
+
+    const onNetworkUnitContent = `[Unit]
+Description=Report onNetwork to compute provider
+After=provisioning-token.service tunnel-subscriber.service
+Wants=provisioning-token.service tunnel-subscriber.service
+ConditionPathExists=/root/secrets/publicdomainrelay.com/market/accept.json
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/send-onnetwork.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+    writeFiles.push({
+      path: "/usr/local/bin/send-onnetwork.sh",
+      permissions: "0700",
+      content: onNetworkScriptContent,
+    });
+    writeFiles.push({
+      path: "/etc/systemd/system/guest-onnetwork.service",
+      permissions: "0644",
+      content: onNetworkUnitContent,
+    });
+
     writeFiles.push({
       path: "/usr/local/bin/provisioning-token.sh",
       permissions: "0700",
@@ -341,6 +397,8 @@ WantedBy=multi-user.target
       content: provisionUnitContent,
     });
 
+    runcmd.unshift("systemctl start --no-block guest-onnetwork.service");
+    runcmd.unshift("systemctl enable guest-onnetwork.service");
     runcmd.unshift("systemctl start --no-block provisioning-token.service");
     runcmd.unshift("systemctl enable provisioning-token.service");
     runcmd.unshift("systemctl daemon-reload");

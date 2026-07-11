@@ -92,15 +92,19 @@ Deno.test("[integration] real shell into a cloud-init guest over the xrpc relay 
     }
     const pubKey = (await Deno.readTextFile(`${keyPath}.pub`)).trim();
 
+    // TODO: derive subdomain from guest's sshd host key instead of pre-generated keypair.
+    // Guest now derives secp256k1 identity from /etc/ssh/ssh_host_ed25519_key at boot.
+    // Test should pre-seed host key, derive secp256k1 via HKDF, and compute subdomain.
+    // For now, generate a temp secp256k1 keypair for subdomain — reconnect after
+    // onNetwork discovery endpoint is complete.
     const keypair = await Secp256k1Keypair.create({ exportable: true });
-    const privateKeyHex = Array.from(await keypair.export()).map((b) => b.toString(16).padStart(2, "0")).join("");
     const subdomain = didToSubdomain(keypair.did());
 
     // Guest cloud-init: sshd@127.0.0.1:22 + tunnel-subscriber dialing the relay.
+    // Guest derives secp256k1 identity from sshd host key at boot — no privateKeyHex in cloud-init.
     const userData = buildTunnelUserData({
       ingressProxyHost: `${gatewayIp}:${relayPort}`,
       audHost: "localhost",
-      privateKeyHex,
       jsrUrl: `${gatewayIp}:${registryPort}`,
       sshAuthorizedKey: pubKey,
     });
