@@ -50,6 +50,9 @@ export interface ComputeProvider {
     bundle: Record<string, unknown>,
   ): string;
   getDroplet?(id: string): Record<string, unknown> | undefined;
+  /** Read iroh node ID from a provisioned guest. Provider-specific mechanism
+   * (container exec, SSH, etc.). Returns undefined if not an iroh transport. */
+  getNodeId?(providerId: string): Promise<string | undefined>;
   setup?(): Promise<void>;
   teardown?(): Promise<void>;
 }

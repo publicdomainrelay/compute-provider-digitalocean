@@ -809,5 +809,13 @@ export function createLocalComputeProvider(
     injectAcceptBundle: injectBundle,
     getDroplet,
     ensureImage,
+
+    async getNodeId(providerId: string): Promise<string | undefined> {
+      try {
+        const { code, stdout } = await backend.exec(String(providerId), ["cat", "/root/secrets/iroh-node-id"]);
+        if (code === 0) return new TextDecoder().decode(stdout).trim() || undefined;
+      } catch { /* container may not have the file */ }
+      return undefined;
+    },
   } as ComputeProvider & { ensureImage(): Promise<void> };
 }
