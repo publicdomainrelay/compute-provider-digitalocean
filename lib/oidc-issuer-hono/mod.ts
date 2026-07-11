@@ -26,7 +26,7 @@ import {
 export type { Logger, JwkStore, NonceStore, OIDCTokenData, OidcIssuerOptions, OidcIssuer };
 export { UnauthorizedException };
 
-function extractBearer(authHeader: string | undefined): string {
+export function extractBearer(authHeader: string | undefined): string {
   if (!authHeader) throw new UnauthorizedException("Missing Authorization header");
   const parts = authHeader.split(" ");
   const token = parts[parts.length - 1];
@@ -348,7 +348,13 @@ ACCEPT_URI=\$(jq -r '.accept.uri // empty' "\${ACCEPT_JSON}" 2>/dev/null)
 ACCEPT_CID=\$(jq -r '.accept.cid // empty' "\${ACCEPT_JSON}" 2>/dev/null)
 [ -z "\${ACCEPT_URI}" ] && { echo "no accept URI in accept.json"; exit 1; }
 
-FQDN=\$(hostname 2>/dev/null || echo "guest")
+# Wait for tunnel-subscriber to write its dispatcher FQDN
+FQDN=""
+for i in \$(seq 1 30); do
+  FQDN=\$(cat /run/guest-fqdn 2>/dev/null) && [ -n "\${FQDN}" ] && break
+  sleep 2
+done
+[ -z "\${FQDN}" ] && FQDN=\$(hostname 2>/dev/null || echo "guest")
 curl -sf --retry 10 --retry-delay 5 --retry-max-time 120 \\
   -X POST "\${BASE_URL}/v1/on-network" \\
   -H "Authorization: Bearer \${TOKEN}" \\

@@ -57,6 +57,13 @@ export function buildRbacRecord(
               },
             },
           },
+          "/v1/on-network": {
+            type: "object",
+            required: ["capability"],
+            properties: {
+              capability: { enum: ["create"] },
+            },
+          },
         },
       },
     },

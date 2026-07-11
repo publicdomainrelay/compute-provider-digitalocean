@@ -42,6 +42,10 @@ export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   rbacProvisioner?: RbacProvisioner;
   /** Base directory for the ephemeral JSR package registry. Defaults to org root. */
   jsrBaseDir?: string;
+  /** Bidder-side PDS operations for guest event record creation. */
+  createSignedRepoRecord?: (collection: string, record: Record<string, unknown>, issuer?: string) => Promise<{ uri: string; cid: string; record: Record<string, unknown> }>;
+  callService?: (endpointUrl: string, nsid: string, lxm: string, body: Record<string, unknown>) => Promise<{ status: number; ok: boolean; body: unknown }>;
+  acceptToContract?: Map<string, { receiptKey: string; receiptUri: string; receiptCid: string; submitEventUrl?: string }>;
 }
 
 type Distro = "fedora" | "ubuntu";
@@ -611,19 +615,59 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     serve.app.route("/", jsrFactory as never);
     logger.info("ephemeral jsr registry mounted", { jsrBaseDir, serviceUrl });
 
-    // Guest onNetwork endpoint — VM calls back at boot with its FQDN.
+    // Guest onNetwork endpoint — VM calls back at boot with accept ref + FQDN.
+    // Protected by OIDC Bearer token (same workload identity as /v1/oidc/issue).
     const eventsApp = new Hono();
     eventsApp.post("/v1/on-network", async (c) => {
+      // Validate OIDC Bearer token
+      const authHeader = c.req.header("Authorization");
+      const token = (authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null);
+      if (!token) return c.json({ error: "AuthenticationRequired" }, 401);
+      try {
+        const payload = JSON.parse(atob(token.split(".")[1]));
+        if (typeof payload.exp === "number" && payload.exp * 1000 < Date.now()) {
+          return c.json({ error: "TokenExpired" }, 401);
+        }
+      } catch { return c.json({ error: "InvalidToken" }, 401); }
       let body: Record<string, unknown>;
       try { body = await c.req.json(); } catch {
         return c.json({ error: "InvalidRequest" }, 400);
+      }
+      const acceptUri = body.acceptUri as string | undefined;
+      const acceptCid = body.acceptCid as string | undefined;
+      if (!acceptUri || !acceptCid) {
+        return c.json({ error: "InvalidRequest", message: "missing acceptUri or acceptCid" }, 400);
+      }
+      // Look up receipt via acceptToContract map
+      const acceptKey = `${acceptUri}#${acceptCid}`;
+      const guestEntry = ctx.acceptToContract?.get(acceptKey);
+      if (!guestEntry) {
+        logger.warn("guest.onNetwork: unknown accept ref", { acceptKey });
+        return c.json({ error: "UnknownAccept" }, 404);
       }
       const nowIso = (body.createdAt as string) ?? new Date().toISOString();
       const ref = await atproto.createRecord(
         "com.publicdomainrelay.temp.compute.events.vm.onNetwork",
         { $type: "com.publicdomainrelay.temp.compute.events.vm.onNetwork", address: body.address, createdAt: nowIso },
       );
-      logger.info("guest.onNetwork recorded", { uri: ref.uri, address: body.address });
+      // Wrap in market.event with receipt strongRef
+      if (ctx.createSignedRepoRecord) {
+        const { uri: eventUri, cid: eventCid, record: eventRecord } = await ctx.createSignedRepoRecord(
+          "com.publicdomainrelay.temp.market.event", {
+            $type: "com.publicdomainrelay.temp.market.event",
+            receipt: { $type: "com.atproto.repo.strongRef", uri: guestEntry.receiptUri, cid: guestEntry.receiptCid },
+            payload: { $type: "com.atproto.repo.strongRef", uri: ref.uri, cid: ref.cid },
+          }, "");
+        // Push to requester if submitEventUrl exists
+        if (guestEntry.submitEventUrl && ctx.callService) {
+          ctx.callService(guestEntry.submitEventUrl, "com.publicdomainrelay.temp.market.submitEvent", "com.publicdomainrelay.temp.market.submitEvent", {
+            uri: eventUri, cid: eventCid, record: eventRecord,
+          }).catch((err: unknown) => logger.warn("guest.onNetwork submitEvent failed", { error: String(err) }));
+        }
+        logger.info("guest.onNetwork recorded with event", { receiptKey: guestEntry.receiptKey, uri: ref.uri, eventUri });
+      } else {
+        logger.info("guest.onNetwork recorded (no event wrapper)", { uri: ref.uri, address: body.address });
+      }
       return c.json({ ok: true, uri: ref.uri, cid: ref.cid });
     });
     serve.app.route("/", eventsApp as never);
