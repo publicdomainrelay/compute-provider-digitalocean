@@ -64,7 +64,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     // Ephemeral JSR registry — serves workspace packages to guest containers.
     const jsrStore = createLocalFsStore({ baseDir: "../..", fallbackVersion: "0.0.0" });
     const jsrFactory = createPackageRegistryFactory({ store: jsrStore, passthrough: false });
-    serve.app.route("/jsr", jsrFactory as never);
+    serve.app.route("/", jsrFactory as never);
     logger.info("ephemeral jsr registry mounted", { serviceUrl });
   });
 

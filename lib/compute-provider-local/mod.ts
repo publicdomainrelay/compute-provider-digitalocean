@@ -607,7 +607,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     const jsrBaseDir = ctx.jsrBaseDir ?? "../..";
     const jsrStore = createLocalFsStore({ baseDir: jsrBaseDir, fallbackVersion: "0.0.0" });
     const jsrFactory = createPackageRegistryFactory({ store: jsrStore, passthrough: false });
-    serve.app.route("/jsr", jsrFactory as never);
+    serve.app.route("/", jsrFactory as never);
     logger.info("ephemeral jsr registry mounted", { jsrBaseDir, serviceUrl });
   });
 
@@ -676,9 +676,8 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       ? await oidcProvisioner.enrich(user_data, agentDidPlc, getIssuerUrl())
       : { userData: user_data, nonce: "", associateWithDroplet: () => {} };
     let enrichedUserData = enriched.userData;
-    // Inject JSR_URL into tunnel-subscriber so the guest can pull packages
-    // from the provider's ephemeral JSR registry over the relay.
-    const jsrUrl = `${getIssuerUrl()}/jsr/`;
+    // Inject JSR_URL — points to provider's serve root where JSR is mounted.
+    const jsrUrl = getIssuerUrl();
     enrichedUserData = enrichedUserData.replace(
       /(ExecStart=deno run .*tunnel-subscriber)/,
       `Environment="JSR_URL=${jsrUrl}"\n      $1`,
