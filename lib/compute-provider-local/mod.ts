@@ -610,6 +610,24 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     const jsrFactory = createPackageRegistryFactory({ store: jsrStore, passthrough: false });
     serve.app.route("/", jsrFactory as never);
     logger.info("ephemeral jsr registry mounted", { jsrBaseDir, serviceUrl });
+
+    // Guest onNetwork endpoint — VM calls back at boot with its FQDN.
+    const eventsApp = new Hono();
+    eventsApp.post("/v1/on-network", async (c) => {
+      let body: Record<string, unknown>;
+      try { body = await c.req.json(); } catch {
+        return c.json({ error: "InvalidRequest" }, 400);
+      }
+      const nowIso = (body.createdAt as string) ?? new Date().toISOString();
+      const ref = await atproto.createRecord(
+        "com.publicdomainrelay.temp.compute.events.vm.onNetwork",
+        { $type: "com.publicdomainrelay.temp.compute.events.vm.onNetwork", address: body.address, createdAt: nowIso },
+      );
+      logger.info("guest.onNetwork recorded", { uri: ref.uri, address: body.address });
+      return c.json({ ok: true, uri: ref.uri, cid: ref.cid });
+    });
+    serve.app.route("/", eventsApp as never);
+    logger.info("guest event routes mounted", { serviceUrl });
   });
 
   const droplets = new Map<string, LocalDroplet>();
