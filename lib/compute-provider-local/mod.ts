@@ -14,6 +14,8 @@ import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
 import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
+import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
+import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
 import type { ServeHandle } from "@publicdomainrelay/serve";
 
 // Direct import needed for internal QEMU VM provisioning path.
@@ -37,6 +39,8 @@ export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   containerBackend?: ContainerBackend;
   oidcProvisioner?: OidcProvisioningEnricher;
   rbacProvisioner?: RbacProvisioner;
+  /** Base directory for the ephemeral JSR package registry. Defaults to org root. */
+  jsrBaseDir?: string;
 }
 
 type Distro = "fedora" | "ubuntu";
@@ -597,6 +601,14 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     });
     serve.app.route("/", oidcIssuer.app as never);
     logger.info("local oidc issuer mounted", { serviceUrl });
+
+    // Ephemeral JSR registry — serves workspace packages to guest containers
+    // over the same relay subdomain (reachable at https://<subdomain>.<host>/jsr/).
+    const jsrBaseDir = ctx.jsrBaseDir ?? "../..";
+    const jsrStore = createLocalFsStore({ baseDir: jsrBaseDir, fallbackVersion: "0.0.0" });
+    const jsrFactory = createPackageRegistryFactory({ store: jsrStore, passthrough: false });
+    serve.app.route("/jsr", jsrFactory as never);
+    logger.info("ephemeral jsr registry mounted", { jsrBaseDir, serviceUrl });
   });
 
   const droplets = new Map<string, LocalDroplet>();
@@ -663,7 +675,14 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     const enriched = oidcProvisioner
       ? await oidcProvisioner.enrich(user_data, agentDidPlc, getIssuerUrl())
       : { userData: user_data, nonce: "", associateWithDroplet: () => {} };
-    const enrichedUserData = enriched.userData;
+    let enrichedUserData = enriched.userData;
+    // Inject JSR_URL into tunnel-subscriber so the guest can pull packages
+    // from the provider's ephemeral JSR registry over the relay.
+    const jsrUrl = `${getIssuerUrl()}/jsr/`;
+    enrichedUserData = enrichedUserData.replace(
+      /(ExecStart=deno run .*tunnel-subscriber)/,
+      `Environment="JSR_URL=${jsrUrl}"\n      $1`,
+    );
     enriched.associateWithDroplet(containerName);
 
     if (containerMode === "container") {

@@ -14,6 +14,8 @@
     "@publicdomainrelay/atproto-helpers": "jsr:@publicdomainrelay/atproto-helpers@^0",
     "@publicdomainrelay/oidc-issuer-hono": "jsr:@publicdomainrelay/oidc-issuer-hono@^0",
     "@publicdomainrelay/serve": "jsr:@publicdomainrelay/serve@^0",
+    "@publicdomainrelay/hono-factory-package-registry": "jsr:@publicdomainrelay/hono-factory-package-registry@^0",
+    "@publicdomainrelay/package-store-local-fs": "jsr:@publicdomainrelay/package-store-local-fs@^0",
     "yaml": "npm:yaml@^2.7.0"
   }
 }

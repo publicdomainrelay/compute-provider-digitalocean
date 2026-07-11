@@ -13,6 +13,8 @@ import type {
 } from "@publicdomainrelay/compute-provider-abc";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
+import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
+import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
 import type { ServeHandle } from "@publicdomainrelay/serve";
 
 export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
@@ -58,6 +60,12 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     });
     serve.app.route("/", oidcIssuer.app as never);
     logger.info("do oidc issuer mounted", { serviceUrl });
+
+    // Ephemeral JSR registry — serves workspace packages to guest containers.
+    const jsrStore = createLocalFsStore({ baseDir: "../..", fallbackVersion: "0.0.0" });
+    const jsrFactory = createPackageRegistryFactory({ store: jsrStore, passthrough: false });
+    serve.app.route("/jsr", jsrFactory as never);
+    logger.info("ephemeral jsr registry mounted", { serviceUrl });
   });
 
   async function makeDoctx(): Promise<{ teamUuid: string }> {
