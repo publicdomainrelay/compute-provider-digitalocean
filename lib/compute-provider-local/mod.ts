@@ -13,7 +13,7 @@ import type {
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
-import { createOidcIssuer, raiseIfUnauthorized, extractBearer, type OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
 import { Hono } from "@hono/hono";
 import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";

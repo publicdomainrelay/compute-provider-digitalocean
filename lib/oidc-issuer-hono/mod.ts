@@ -523,7 +523,7 @@ async function provisioningValidate(
   return { oidcToken, droplet };
 }
 
-async function raiseIfUnauthorized(
+export async function raiseIfUnauthorized(
   service: string,
   scope: string,
   token: string,
