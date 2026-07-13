@@ -43,6 +43,9 @@ export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   /** Dispatcher host:port (e.g. localhost:8080) — used to rewrite *.localhost
    * URLs for guest containers that can't resolve localhost. */
   ingressProxyHost?: string;
+  /** PEM CA certificate to inject into the guest container's trust store.
+   * Used when the relay serves HTTPS with a self-signed cert. */
+  caCertPem?: string;
   /** Base directory for the ephemeral JSR package registry. Defaults to org root. */
   jsrBaseDir?: string;
   /** Bidder-side PDS operations for guest event record creation. */
@@ -750,38 +753,39 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     );
 
     // *.localhost inside the container = container's own loopback, not the
-    // host. Parse cloud-init YAML → modify bootcmd + JSR_URL → re-serialize.
+    // host. Parse cloud-init YAML → modify bootcmd + CA cert → re-serialize.
     // Same object-level pattern as injectAcceptBundle in cloud-init-common.
     const issuerHost = (() => { try { return new URL(jsrUrl).hostname; } catch { return ""; } })();
     if (issuerHost.endsWith(".localhost")) {
       try {
         const gw = await backend.defaultGateway?.();
         if (gw) {
-          // Extract the relay port from ingressProxyHost (e.g. localhost:62097 → 62097).
-          // The issuer URL uses default port (443) so URL.port returns empty.
-          const relayPort = ctx.ingressProxyHost?.includes(":") ? ctx.ingressProxyHost.split(":").pop() : "";
-          const portSuffix = relayPort ? `:${relayPort}` : "";
           const obj = yamlParse(enrichedUserData.replace(/^#cloud-config\s*/i, "")) as Record<string, unknown> | null;
           if (obj && typeof obj === "object") {
             // bootcmd runs before systemd units — tunnel subscriber sees the
             // patched /etc/hosts and resolves *.localhost → host gateway.
             const bootcmd = (obj.bootcmd ??= []) as unknown[];
             bootcmd.unshift(`echo ${gw} ${issuerHost} >> /etc/hosts`);
-            // Replace jsr: specifier with direct HTTP URL to the local JSR
-            // registry. deno ignores JSR_URL env var for jsr: resolution but
-            // accepts bare HTTP URLs. The relay routes the subdomain-prefixed
-            // gateway IP to the provider's JSR mount.
-            // e.g. jsr:@publicdomainrelay/hono-did-key-ingress-proxy-tunnel-subscriber
-            //   → http://did-key-xxx.192.168.64.1:PORT/@publicdomainrelay/hono-did-key-ingress-proxy-tunnel-subscriber/0.0.0/mod.ts
-            const pkgUrl = `http://${issuerHost.replace(/\.localhost$/, `.${gw}`)}${portSuffix}/@publicdomainrelay/hono-did-key-ingress-proxy-tunnel-subscriber/0.0.0/mod.ts`;
-            // Write back, replacing jsr: specifier with direct URL
-            let rebuilt = "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
-            rebuilt = rebuilt.replace(
-              /jsr:@publicdomainrelay\/hono-did-key-ingress-proxy-tunnel-subscriber/,
-              pkgUrl,
-            );
-            enrichedUserData = rebuilt;
-            logger.info("container networking: patched cloud-init for gateway", { issuerHost, gateway: gw, jsrUrl });
+
+            // Inject self-signed CA cert into guest trust store so the
+            // relay's HTTPS cert (*.localhost) is trusted. Without this,
+            // deno rejects the HTTPS JSR_URL and falls back to jsr.io.
+            if (ctx.caCertPem) {
+              const writeFiles = (obj["write_files"] as unknown[]) ?? [];
+              writeFiles.push({
+                path: "/usr/local/share/ca-certificates/relay-ca.crt",
+                owner: "root:root",
+                permissions: "0644",
+                content: ctx.caCertPem,
+              });
+              obj["write_files"] = writeFiles;
+              const runcmd = (obj["runcmd"] as unknown[]) ?? [];
+              runcmd.push("update-ca-certificates");
+              obj["runcmd"] = runcmd;
+            }
+
+            enrichedUserData = "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
+            logger.info("container networking: patched cloud-init for gateway", { issuerHost, gateway: gw, hasCaCert: !!ctx.caCertPem });
           }
         }
       } catch { /* best-effort */ }
