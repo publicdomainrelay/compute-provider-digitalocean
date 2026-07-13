@@ -248,5 +248,37 @@ export function createDockerBackend(): ContainerBackend {
       console.error("docker not running — could not start daemon");
       return false;
     },
+
+    logStream(containerName: string): ReadableStream<string> {
+      const isWindows = Deno.build.os === "windows";
+      const dockerBin = isWindows ? "wsl" : "docker";
+      const dockerArgs = isWindows ? ["docker", "logs", "-f", containerName] : ["logs", "-f", containerName];
+      return new ReadableStream({
+        start: async (controller) => {
+          const child = new Deno.Command(dockerBin, {
+            args: dockerArgs,
+            stdout: "piped",
+          }).spawn();
+          const reader = child.stdout.getReader();
+          const decoder = new TextDecoder();
+          let leftover = "";
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              leftover += decoder.decode(value, { stream: true });
+              const lines = leftover.split("\n");
+              leftover = lines.pop() ?? "";
+              for (const line of lines) {
+                if (line.trim()) controller.enqueue(line);
+              }
+            }
+          } finally {
+            controller.close();
+            try { child.kill("SIGTERM"); } catch { /* already exited */ }
+          }
+        },
+      });
+    },
   };
 }

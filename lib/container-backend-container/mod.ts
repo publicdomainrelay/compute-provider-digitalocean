@@ -101,5 +101,34 @@ export function createContainerBackend(): ContainerBackend {
       console.error("container system start timed out waiting for apiserver");
       return false;
     },
+
+    logStream(containerName: string): ReadableStream<string> {
+      return new ReadableStream({
+        start: async (controller) => {
+          const child = new Deno.Command("container", {
+            args: ["logs", "-f", containerName],
+            stdout: "piped",
+          }).spawn();
+          const reader = child.stdout.getReader();
+          const decoder = new TextDecoder();
+          let leftover = "";
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              leftover += decoder.decode(value, { stream: true });
+              const lines = leftover.split("\n");
+              leftover = lines.pop() ?? "";
+              for (const line of lines) {
+                if (line.trim()) controller.enqueue(line);
+              }
+            }
+          } finally {
+            controller.close();
+            try { child.kill("SIGTERM"); } catch { /* already exited */ }
+          }
+        },
+      });
+    },
   };
 }

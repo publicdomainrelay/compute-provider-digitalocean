@@ -36,4 +36,9 @@ export interface ContainerBackend {
 
   /** Start backend daemon if not running. Returns true if now running. */
   ensureRunning(): Promise<boolean>;
+
+  /** Stream container logs line-by-line. Returns a ReadableStream of UTF-8
+   * lines (no trailing newline). The stream ends when the container stops
+   * or is removed. */
+  logStream(containerName: string): ReadableStream<string>;
 }
