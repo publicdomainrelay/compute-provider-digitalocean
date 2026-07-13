@@ -663,7 +663,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
             $type: "com.publicdomainrelay.temp.market.event",
             receipt: { $type: "com.atproto.repo.strongRef", uri: guestEntry.receiptUri, cid: guestEntry.receiptCid },
             payload: { $type: "com.atproto.repo.strongRef", uri: ref.uri, cid: ref.cid },
-          }, "");
+          }, atproto.getAgentDid());
         // Push to requester if submitEventUrl exists
         if (guestEntry.submitEventUrl && ctx.callService) {
           ctx.callService(guestEntry.submitEventUrl, "com.publicdomainrelay.temp.market.submitEvent", "com.publicdomainrelay.temp.market.submitEvent", {
