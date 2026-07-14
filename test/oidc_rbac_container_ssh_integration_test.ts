@@ -14,7 +14,6 @@
 //   deno test -A test/oidc_rbac_container_ssh_integration_test.ts
 
 import { assert, assertStringIncludes } from "@std/assert";
-import { Secp256k1Keypair } from "@atproto/crypto";
 import { runContainer } from "@publicdomainrelay/compute-provider-local";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
@@ -22,7 +21,7 @@ import { createDockerBackend } from "@publicdomainrelay/container-backend-docker
 import { createRelayFactory } from "@publicdomainrelay/hono-factory-did-key-ingress-proxy-xrpc";
 import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
 import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
-import { didToSubdomain, TUNNEL_NSID } from "@publicdomainrelay/did-key-ingress-proxy-common";
+import { TUNNEL_NSID } from "@publicdomainrelay/did-key-ingress-proxy-common";
 import { buildTunnelUserData } from "@publicdomainrelay/cloud-init-common";
 
 const SSH_READY_TIMEOUT_MS = 300_000;
@@ -92,14 +91,6 @@ Deno.test("[integration] real shell into a cloud-init guest over the xrpc relay 
     }
     const pubKey = (await Deno.readTextFile(`${keyPath}.pub`)).trim();
 
-    // TODO: derive subdomain from guest's sshd host key instead of pre-generated keypair.
-    // Guest now derives secp256k1 identity from /etc/ssh/ssh_host_ed25519_key at boot.
-    // Test should pre-seed host key, derive secp256k1 via HKDF, and compute subdomain.
-    // For now, generate a temp secp256k1 keypair for subdomain — reconnect after
-    // onNetwork discovery endpoint is complete.
-    const keypair = await Secp256k1Keypair.create({ exportable: true });
-    const subdomain = didToSubdomain(keypair.did());
-
     // Guest cloud-init: sshd@127.0.0.1:22 + tunnel-subscriber dialing the relay.
     // Guest derives secp256k1 identity from sshd host key at boot — no privateKeyHex in cloud-init.
     const userData = buildTunnelUserData({
@@ -112,6 +103,24 @@ Deno.test("[integration] real shell into a cloud-init guest over the xrpc relay 
     containerName = `test-ssh-relay-${crypto.randomUUID().slice(0, 8)}`;
     await runContainer(backend, userData, { distro: "ubuntu", containerName });
     cleanups.push(() => backend.rm(containerName).catch(() => {}));
+
+    // Read the guest's FQDN from /run/guest-fqdn, written by the tunnel
+    // subscriber at boot. The subscriber starts after sshd and may take
+    // ~30s to download Deno deps, derive its key, and register with the
+    // relay. Poll until the file is non-empty.
+    let guestFqdn = "";
+    let subdomain = "";
+    const fqdnDeadline = Date.now() + 120_000;
+    while (Date.now() < fqdnDeadline) {
+      const { stdout } = await backend.exec(containerName, ["cat", "/run/guest-fqdn"]);
+      guestFqdn = stdout.trim();
+      if (guestFqdn) {
+        subdomain = guestFqdn.split(".")[0];
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    console.log(`[test] guest FQDN: ${guestFqdn}, subdomain: ${subdomain}`);
 
     // Host ProxyCommand stays websocat (as the reference cli.ts): it wraps ssh
     // stdio in a WebSocket to the relay tunnel endpoint for the guest subdomain;
