@@ -501,14 +501,14 @@ async function provisioningValidate(
   token: string,
   signature: string,
   port: number,
-  dropletGetter: (id: string) => Record<string, unknown> | undefined,
+  dropletGetter: (id: string) => Record<string, unknown> | Promise<Record<string, unknown> | undefined> | undefined,
 ): Promise<{ oidcToken: OIDCToken; droplet: Record<string, unknown> } | null> {
   const oidcToken = await OIDCToken.validate(token);
   const nonce = oidcToken.claims["nonce"] as string | undefined;
   if (!nonce) throw new Error("provisioning token missing nonce claim");
 
   const dropletId = _nonceStore.getProvisioningNonceDropletId(nonce);
-  const droplet = dropletGetter(dropletId);
+  const droplet = await dropletGetter(dropletId);
   if (!droplet) throw new Error(`droplet ${dropletId} not found`);
 
   const networks = droplet["networks"] as { v4: { ip_address: string; type: string }[] } | undefined;
