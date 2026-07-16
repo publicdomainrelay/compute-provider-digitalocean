@@ -669,8 +669,8 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
       const actx = provToken.actx;
       log("info", "prove start", { actx, sub: provToken.sub, port: body.port });
 
-      const result = await provisioningValidate(token, body.sig, body.port, (id) => {
-        return getDroplet(id);
+      const result = await provisioningValidate(token, body.sig, body.port, async (id) => {
+        return await getDroplet(id);
       });
       if (!result) {
         log("warn", "prove rejected", { actx, reason: "provisioningValidate returned null" });
