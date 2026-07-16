@@ -780,7 +780,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       if (gw) {
         const jsrUrl = `http://${gw}:${_jsrPort}/`;
         enrichedUserData = enrichedUserData.replace(
-          /(ExecStart=deno run .*tunnel-subscriber)/,
+          /(ExecStart=\S*deno run .*tunnel-subscriber)/,
           `Environment="JSR_URL=${jsrUrl}"\n      $1`,
         );
       }

@@ -299,7 +299,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     let enrichedUserData = enriched.userData;
     if (_serviceUrl) {
       enrichedUserData = enrichedUserData.replace(
-        /(ExecStart=deno run .*tunnel-subscriber)/,
+        /(ExecStart=\S*deno run .*tunnel-subscriber)/,
         `Environment="JSR_URL=${_serviceUrl}"\n      $1`,
       );
     }
