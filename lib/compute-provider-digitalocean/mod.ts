@@ -173,7 +173,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     });
     const jsrFactory = createPackageRegistryFactory({
       store: jsrStore,
-      passthrough: false,
+      passthrough: true,
     });
     serve.app.route("/", jsrFactory as never);
     logger.info("ephemeral jsr registry mounted", { serviceUrl });
