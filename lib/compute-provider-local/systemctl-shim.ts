@@ -94,6 +94,8 @@ interface Unit {
   remainAfterExit: boolean;
   timeoutStopSec: number;
   conditionPathExists: string[];
+  runtimeDirectory?: string;
+  runtimeDirectoryMode?: number;
   // path unit fields (from [Path] section)
   pathExists?: string[];
   pathChanged?: string[];
@@ -122,6 +124,8 @@ function sshdUnit(): Unit {
     type: "simple",
     execStart: "pkill -x sshd 2>/dev/null; sleep 0.3; exec /usr/sbin/sshd -D -e -p 22",
     execStartPre: ["/usr/sbin/sshd -t"],
+    runtimeDirectory: "sshd",
+    runtimeDirectoryMode: 0o755,
     restart: "always",
     restartSec: 2,
   };
@@ -155,6 +159,8 @@ async function parseUnitFile(path: string, name: string): Promise<Unit> {
     u.remainAfterExit = svc["RemainAfterExit"] === "yes" || svc["RemainAfterExit"] === "true";
   }
   if (svc["TimeoutStopSec"]) u.timeoutStopSec = parseInt(svc["TimeoutStopSec"], 10) || 10;
+  if (svc["RuntimeDirectory"]) u.runtimeDirectory = svc["RuntimeDirectory"];
+  if (svc["RuntimeDirectoryMode"]) u.runtimeDirectoryMode = parseInt(svc["RuntimeDirectoryMode"], 8);
   if (unt["ConditionPathExists"]) u.conditionPathExists = unt["ConditionPathExists"].split("\n");
 
   const pth = ini["Path"] ?? {};
@@ -360,6 +366,11 @@ async function superviseUnit(name: string): Promise<void> {
       return;
     }
 
+    if (unit.runtimeDirectory) {
+      const mode = unit.runtimeDirectoryMode ?? 0o755;
+      await Deno.mkdir(`/run/${unit.runtimeDirectory}`, { mode, recursive: true }).catch(() => {});
+    }
+
     if (!(await runExecStartPre(unit))) {
       await unwant(key);
       return;
@@ -487,6 +498,17 @@ async function initMode() {
   const timer = setInterval(() => { reconcile(); }, RECONCILE_INTERVAL_MS);
 
   await seedCloudInit();
+
+  // Tail cloud-init log to container stdout (background, lives for the
+  // lifetime of PID 1). -F waits for file if it doesn't exist yet; stderr
+  // goes to /dev/null so "No such file" on startup is silent.
+  const tailLog = new Deno.Command("tail", {
+    args: ["-F", "/var/log/cloud-init.log"],
+    stdout: "inherit",
+    stderr: "null",
+  }).spawn();
+  tailLog.ref();
+
   await runCloudInit();
 
   log("PID 1: reconcile loop active; supervising services");
@@ -610,6 +632,16 @@ async function commandMode() {
       else if (serviceExited(u)) console.log("   Active: active (exited)");
       else console.log("   Active: inactive (dead)");
       break;
+    }
+
+    case "show": {
+      // stub: cloud-init cc_set_passwords calls `systemctl show
+      // --property ActiveState --value ssh` to check if sshd is running.
+      // Return active/inactive based on our wanted+running state.
+      const u = canonical(units[0] ?? "");
+      const active = serviceRunning(u) || serviceExited(u) || isWanted(u);
+      console.log(active ? "active" : "inactive");
+      Deno.exit(0);
     }
 
     case "--version":

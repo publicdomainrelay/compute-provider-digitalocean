@@ -216,17 +216,22 @@ exec deno run -A /usr/local/bin/systemctl-shim.ts --init
 function generateDockerfile(distro: Distro): string {
   const base = distro === "fedora"
     ? `FROM fedora:latest
-RUN dnf install -y \\
+RUN dnf upgrade -y \\
+  && dnf install -y \\
     cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip python3 \\
   && dnf clean all`
-    : `FROM ubuntu:latest
+    : `FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y \\
-    cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip ca-certificates locales python3 \\
-  && rm -rf /var/lib/apt/lists/*`;
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \\
+    cloud-init openssh-server openssh-client openssh-sftp-server sudo curl jq util-linux rsyslog vim tmux git unzip ca-certificates locales python3
+RUN echo "datasource_list: [NoCloud]" > /etc/cloud/cloud.cfg.d/99-datasource.cfg`;
 
   return `${base}
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
+ARG DENO_VERSION=v2.9.2
+RUN _arch=\$(uname -m) && case "\$_arch" in x86_64|amd64) _arch=x86_64 ;; aarch64|arm64) _arch=aarch64 ;; esac && \\
+    curl -fsSL "https://dl.deno.land/release/\${DENO_VERSION}/deno-\${_arch}-unknown-linux-gnu.zip" -o /tmp/deno.zip && \\
+    unzip -d /usr/local/bin /tmp/deno.zip && \\
+    rm /tmp/deno.zip
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
@@ -236,13 +241,15 @@ ENTRYPOINT ["/entrypoint.sh"]
 export async function buildContainerImage(
   backend: ContainerBackend,
   distro: Distro = "ubuntu",
+  opts: { force?: boolean } = {},
 ): Promise<string> {
   const tag = imageTag(distro);
 
-  if (await backend.imageExists(tag)) {
+  if (!opts.force && await backend.imageExists(tag)) {
     console.log(`==> Image ${tag} already exists. Skipping build.`);
     return tag;
   }
+  if (opts.force) console.log(`==> Force-rebuilding ${tag}...`);
 
   console.log(`==> Building container image for ${distro}...`);
 
@@ -283,16 +290,12 @@ async function copySystemctlShim(
   cacheDir: string,
 ): Promise<string> {
   const dst = `${cacheDir}/systemctl-shim-${distro}.ts`;
-  // Check cache first — the caller may have pre-seeded the file to avoid
-  // a runtime fetch (e.g. in compiled apps where fetch(file://…) may fail).
-  try {
-    const existing = await Deno.readTextFile(dst);
-    if (existing.length > 0) return dst;
-  } catch { /* not cached yet */ }
   const systemctlShimSrc = new URL(
     "./systemctl-shim.ts",
     import.meta.url,
   );
+  // Always fetch fresh — the shim changes during development and staleness
+  // causes confusing failures (wrong flags, missing fixes).
   const resp = await fetch(systemctlShimSrc);
   if (!resp.ok) throw new Error(`Failed to load systemctl-shim: ${resp.status}`);
   const content = await resp.text();
