@@ -414,6 +414,16 @@ WantedBy=multi-user.target
     runcmd.unshift("systemctl start --no-block provisioning-token.service");
     runcmd.unshift("systemctl enable provisioning-token.service");
     runcmd.unshift("systemctl daemon-reload");
+    // DO sets root password expired — PAM blocks even key-based SSH.
+    // Direct shadow edit: clear password field (no password = no expiry)
+    // and set max days to 99999 (disabled). More reliable than passwd/chage
+    // which may need PAM/TTY or be unavailable in cloud-init's minimal env.
+    runcmd.unshift(
+      "sed -i 's/^root:[^:]*:[^:]*:[^:]*:[^:]*:/root::19000:0:99999:/' /etc/shadow || true",
+    );
+    // cloud-init write_files creates /root/.ssh with 0755; SSH requires 0700
+    // for publickey auth. Fix before sshd starts checking keys.
+    runcmd.unshift("[ -d /root/.ssh ] && chmod 700 /root/.ssh || true");
 
     userDataObj["write_files"] = writeFiles;
     userDataObj["runcmd"] = runcmd;
