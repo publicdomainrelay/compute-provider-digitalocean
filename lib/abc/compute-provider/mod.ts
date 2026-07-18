@@ -62,5 +62,7 @@ export interface RbacProvisioner {
     getIssuerUrl: () => string;
     createRecord: (collection: string, record: Record<string, unknown>) => Promise<{ uri: string }>;
     parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
+    /** Override actx for providers where actx != agent's PLC (e.g. DigitalOcean uses team UUID). */
+    actx?: string;
   }): Promise<{ uri: string } | undefined>;
 }

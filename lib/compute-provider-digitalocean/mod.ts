@@ -291,9 +291,11 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     const finalSize = spec?.size ?? "s-1vcpu-512mb-10gb";
     const finalImage = "ubuntu-24-04-x64";
 
-    // OIDC enrichment
+    // OIDC enrichment — actx must be the DO team UUID (from /v2/account),
+    // not the requester DID or the bidder's ATProto PLC.
+    const doctx = await cachedDoctx();
     const enriched = oidcProvisioner
-      ? await oidcProvisioner.enrich(user_data, requesterDid, getIssuerUrl())
+      ? await oidcProvisioner.enrich(user_data, doctx.teamUuid, getIssuerUrl())
       : { userData: user_data, nonce: "", associateWithDroplet: (_id: string) => {} };
 
     let enrichedUserData = enriched.userData;
@@ -325,6 +327,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
           record: Record<string, unknown>,
         ) => atproto.createRecord(collection, record),
         parseAtUri,
+        actx: doctx.teamUuid,
       }) as StrongRef | undefined;
     }
 

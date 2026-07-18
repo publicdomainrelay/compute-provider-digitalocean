@@ -8,6 +8,8 @@ export interface RbacRecordOpts {
   serviceBaseUrl: string;
   scope?: string;
   createdAt?: string;
+  /** Override actx for providers where actx != agent's PLC (e.g. DigitalOcean uses team UUID). */
+  actx?: string;
 }
 
 export function buildRbacRecord(
@@ -16,11 +18,12 @@ export function buildRbacRecord(
   role: string,
   opts: RbacRecordOpts,
 ): Record<string, unknown> {
+  const actx = opts.actx ?? agentDidPlc;
   const serviceBaseUrl = opts.serviceBaseUrl;
   const scope = opts.scope ?? "droplets.wid";
-  const slug = `${agentDidPlc}-${requesterPlc}-${role}`;
+  const slug = `${actx}-${requesterPlc}-${role}`;
   const roleName = opts.roleName ?? `ex-${slug}`;
-  const subject = `actx:${agentDidPlc}:plc:${requesterPlc}:role:${role}`;
+  const subject = `actx:${actx}:plc:${requesterPlc}:role:${role}`;
 
   return {
     $type: RBAC_NSID,
@@ -31,7 +34,7 @@ export function buildRbacRecord(
       [roleName]: {
         role_name: roleName,
         definition: {
-          aud: `api://DigitalOcean?actx=${agentDidPlc}`,
+          aud: `api://DigitalOcean?actx=${actx}`,
           sub: subject,
           policies: [roleName],
         },
@@ -79,6 +82,8 @@ export interface RbacContext {
   deleteRecord?: (collection: string, rkey: string) => Promise<void>;
   parseAtUri: (uri: string) => { repo: string; collection: string; rkey: string };
   log?: (level: string, msg: string, meta?: Record<string, unknown>) => void;
+  /** Override actx for providers where actx != agent's PLC (e.g. DigitalOcean uses team UUID). */
+  actx?: string;
 }
 
 const noopLog = (_l: string, _m: string, _e?: Record<string, unknown>) => {};
@@ -94,6 +99,7 @@ export async function configureRbac(
 
   const record = buildRbacRecord(agentDidPlc, requesterPlc, vm.role, {
     serviceBaseUrl: ctx.getIssuerUrl(),
+    actx: ctx.actx,
   });
 
   log("info", "creating rbac record", { nsid: RBAC_NSID, roleName: `ex-${agentDidPlc}-${requesterPlc}-${vm.role}` });
@@ -361,6 +367,7 @@ export function createRbacProvisioner(): RbacProvisioner {
           record: Record<string, unknown>,
         ) => Promise<StrongRef>,
         parseAtUri: ctx.parseAtUri,
+        actx: ctx.actx,
       };
       return configureRbac(vm, requesterDid, rbacCtx);
     },

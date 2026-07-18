@@ -288,6 +288,12 @@ export class ProvisioningData {
       /* not valid YAML, start fresh */
     }
 
+    // Key-only root login; password auth disabled to prevent DO's
+    // expired-root-password PAM prompt ("Password change required but
+    // no TTY available") from blocking non-interactive SSH.
+    userDataObj["ssh_pwauth"] = false;
+    userDataObj["disable_root"] = false;
+
     const runcmd = (userDataObj["runcmd"] as unknown[]) ?? [];
     const writeFiles = (userDataObj["write_files"] as unknown[]) ?? [];
 
