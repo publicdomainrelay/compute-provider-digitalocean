@@ -1,4 +1,5 @@
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
+import { acceptBundleModule, buildUserData } from "@publicdomainrelay/cloud-init-common";
 import type { Logger, LoggerInterface, StructuredLoggerInterface } from "@publicdomainrelay/logger";
 import type {
   ComputeAtproto,
@@ -552,35 +553,10 @@ export function injectAcceptBundle(
   bundle: Record<string, unknown>,
   acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
 ): string {
-  let obj: Record<string, unknown> = {};
-  try {
-    const parsed = userData
-      ? yamlParse(userData.replace(/^#cloud-config\s*/i, ""))
-      : null;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      obj = parsed as Record<string, unknown>;
-    }
-  } catch {
-    /* fall through with empty obj */
-  }
-
-  const writeFiles = (obj["write_files"] as unknown[]) ?? (obj["write_files"] = []) as unknown[];
-  writeFiles.push({
-    path: acceptPathVm,
-    owner: "root:root",
-    permissions: "0600",
-    content: JSON.stringify(bundle, null, 2),
+  return buildUserData({
+    base: userData,
+    modules: [acceptBundleModule(acceptPathVm, bundle)],
   });
-
-  const runcmd = (obj["runcmd"] as unknown[]) ?? (obj["runcmd"] = []) as unknown[];
-  const parent = acceptPathVm.split("/").slice(0, -1).join("/");
-  runcmd.unshift([
-    "sh",
-    "-c",
-    `install -d -m 0700 -o root -g root ${parent}`,
-  ]);
-
-  return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
 }
 
 interface LocalDroplet {

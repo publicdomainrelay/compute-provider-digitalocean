@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
+import { buildUserData } from "@publicdomainrelay/cloud-init-common";
 import * as jose from "jose";
 import type { Logger } from "@publicdomainrelay/logger";
 import { noopLogger } from "@publicdomainrelay/logger";
@@ -280,22 +280,9 @@ export class ProvisioningData {
       ttl,
     });
 
-    let userDataObj: Record<string, unknown> = {};
-    try {
-      const parsed = yamlParse(userData);
-      if (parsed && typeof parsed === "object") userDataObj = parsed as Record<string, unknown>;
-    } catch {
-      /* not valid YAML, start fresh */
-    }
-
     // Key-only root login; password auth disabled to prevent DO's
     // expired-root-password PAM prompt ("Password change required but
     // no TTY available") from blocking non-interactive SSH.
-    userDataObj["ssh_pwauth"] = false;
-    userDataObj["disable_root"] = false;
-
-    const runcmd = (userDataObj["runcmd"] as unknown[]) ?? [];
-    const writeFiles = (userDataObj["write_files"] as unknown[]) ?? [];
 
     const provisionScriptContent = `#!/usr/bin/env bash
 set -euo pipefail
@@ -387,48 +374,37 @@ StandardError=journal
 WantedBy=multi-user.target
 `;
 
-    writeFiles.push({
-      path: "/usr/local/bin/send-onnetwork.sh",
-      permissions: "0700",
-      content: onNetworkScriptContent,
+    // Compose via the shared cloud-init-common buildUserData: the base
+    // user_data patched with the provisioning exchange. runcmdPrepend preserves
+    // the exact unshift order of the hand-rolled merge it replaces.
+    const finalUserData = buildUserData({
+      base: userData,
+      modules: [() => ({
+        disable_root: false,
+        ssh_pwauth: false,
+        write_files: [
+          { path: "/usr/local/bin/send-onnetwork.sh", permissions: "0700", content: onNetworkScriptContent },
+          { path: "/etc/systemd/system/guest-onnetwork.service", permissions: "0644", content: onNetworkUnitContent },
+          { path: "/usr/local/bin/provisioning-token.sh", permissions: "0700", content: provisionScriptContent },
+          { path: "/etc/systemd/system/provisioning-token.service", permissions: "0644", content: provisionUnitContent },
+        ],
+        runcmdPrepend: [
+          // cloud-init write_files creates /root/.ssh with 0755; SSH requires
+          // 0700 for publickey auth. Fix before sshd starts checking keys.
+          "[ -d /root/.ssh ] && chmod 700 /root/.ssh || true",
+          // DO sets root password expired — PAM blocks even key-based SSH.
+          // Direct shadow edit: clear password field (no password = no expiry)
+          // and set max days to 99999 (disabled). More reliable than passwd/chage
+          // which may need PAM/TTY or be unavailable in cloud-init's minimal env.
+          "sed -i 's/^root:[^:]*:[^:]*:[^:]*:[^:]*:/root::19000:0:99999:/' /etc/shadow || true",
+          "systemctl daemon-reload",
+          "systemctl enable provisioning-token.service",
+          "systemctl start --no-block provisioning-token.service",
+          "systemctl enable guest-onnetwork.service",
+          "systemctl start --no-block guest-onnetwork.service",
+        ],
+      })],
     });
-    writeFiles.push({
-      path: "/etc/systemd/system/guest-onnetwork.service",
-      permissions: "0644",
-      content: onNetworkUnitContent,
-    });
-
-    writeFiles.push({
-      path: "/usr/local/bin/provisioning-token.sh",
-      permissions: "0700",
-      content: provisionScriptContent,
-    });
-    writeFiles.push({
-      path: "/etc/systemd/system/provisioning-token.service",
-      permissions: "0644",
-      content: provisionUnitContent,
-    });
-
-    runcmd.unshift("systemctl start --no-block guest-onnetwork.service");
-    runcmd.unshift("systemctl enable guest-onnetwork.service");
-    runcmd.unshift("systemctl start --no-block provisioning-token.service");
-    runcmd.unshift("systemctl enable provisioning-token.service");
-    runcmd.unshift("systemctl daemon-reload");
-    // DO sets root password expired — PAM blocks even key-based SSH.
-    // Direct shadow edit: clear password field (no password = no expiry)
-    // and set max days to 99999 (disabled). More reliable than passwd/chage
-    // which may need PAM/TTY or be unavailable in cloud-init's minimal env.
-    runcmd.unshift(
-      "sed -i 's/^root:[^:]*:[^:]*:[^:]*:[^:]*:/root::19000:0:99999:/' /etc/shadow || true",
-    );
-    // cloud-init write_files creates /root/.ssh with 0755; SSH requires 0700
-    // for publickey auth. Fix before sshd starts checking keys.
-    runcmd.unshift("[ -d /root/.ssh ] && chmod 700 /root/.ssh || true");
-
-    userDataObj["write_files"] = writeFiles;
-    userDataObj["runcmd"] = runcmd;
-
-    const finalUserData = "#cloud-config\n" + yamlStringify(userDataObj, { lineWidth: 0 });
 
     return new ProvisioningData({ nonce, token, userData: finalUserData });
   }
