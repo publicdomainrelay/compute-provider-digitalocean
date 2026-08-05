@@ -220,11 +220,18 @@ function generateDockerfile(distro: Distro): string {
 RUN dnf upgrade -y \\
   && dnf install -y \\
     cloud-init openssh-server sudo curl jq util-linux rsyslog vim tmux git unzip python3 \\
-  && dnf clean all`
+  && dnf clean all
+RUN curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash - \\
+  && dnf install -y nodejs \\
+  && dnf clean all \\
+  && node --version && npm --version`
     : `FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get upgrade -y && apt-get install -y \\
     cloud-init openssh-server openssh-client openssh-sftp-server sudo curl jq util-linux rsyslog vim tmux git unzip ca-certificates locales python3
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \\
+  && apt-get install -y nodejs \\
+  && node --version && npm --version
 RUN echo "datasource_list: [NoCloud]" > /etc/cloud/cloud.cfg.d/99-datasource.cfg`;
 
   return `${base}
