@@ -20,6 +20,22 @@ function log(msg: string) {
   console.error(`[systemctl-shim] ${msg}`);
 }
 
+// Relay a child's stdout/stderr stream to the shim's own so every subprocess
+// line lands in the container log even when the child exits abruptly.
+async function relayStream(
+  stream: ReadableStream<Uint8Array>,
+  target: typeof Deno.stdout,
+): Promise<void> {
+  try {
+    const reader = stream.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value?.length) await target.write(value);
+    }
+  } catch { /* stream already closed */ }
+}
+
 async function ensureStateDirs() {
   for (const d of [WANTED, ENABLED, PIDS, EXITED]) {
     await Deno.mkdir(d, { recursive: true }).catch(() => {});
@@ -153,6 +169,7 @@ async function parseUnitFile(path: string, name: string): Promise<Unit> {
   if (svc["ExecStartPre"]) u.execStartPre = svc["ExecStartPre"].split("\n");
   if (svc["WorkingDirectory"]) u.workingDirectory = svc["WorkingDirectory"];
   if (svc["Environment"]) u.environment = svc["Environment"].split("\n");
+  log(`parseUnitFile(${name}): raw Environment=${JSON.stringify(svc["Environment"])} parsed=${JSON.stringify(u.environment)}`);
   if (svc["Restart"]) u.restart = svc["Restart"] as Unit["restart"];
   if (svc["RestartSec"]) u.restartSec = parseInt(svc["RestartSec"], 10) || 5;
   if (svc["RemainAfterExit"]) {
@@ -175,8 +192,13 @@ async function resolveUnit(name: string): Promise<Unit | null> {
   const n = canonical(name);
   if (n === "ssh.service") return sshdUnit();
   const path = await findUnitFile(n);
-  if (!path) return null;
-  return await parseUnitFile(path, n);
+  if (!path) {
+    log(`resolveUnit(${name}) -> ${n} NOT FOUND in ${UNIT_SEARCH_PATHS.join(",")}`);
+    return null;
+  }
+  const unit = await parseUnitFile(path, n);
+  log(`resolveUnit(${name}) -> ${path} env=${JSON.stringify(unit.environment)} execStart=${unit.execStart?.slice(0, 90)}`);
+  return unit;
 }
 
 // Condition / process helpers
@@ -246,11 +268,13 @@ function envObject(unit: Unit): Record<string, string> {
 }
 
 function commandOpts(unit: Unit, script: string): Deno.CommandOptions {
+  const env = envObject(unit);
+  log(`commandOpts(${unit.name}): script=${script.slice(0, 90)} JSR_URL=${env["JSR_URL"] ?? "(unset)"} envKeys=${Object.keys(env).join(",")}`);
   const opts: Deno.CommandOptions = {
     args: ["-c", script],
     stdout: "inherit",
     stderr: "inherit",
-    env: envObject(unit),
+    env,
   };
   if (unit.workingDirectory) opts.cwd = unit.workingDirectory;
   return opts;
@@ -390,9 +414,15 @@ async function superviseUnit(name: string): Promise<void> {
     // simple / forking / notify -- supervise with restart policy.
     log(`Starting ${key} (${unit.type})`);
     while (isWanted(key)) {
-      const child = new Deno.Command("bash", commandOpts(unit, unit.execStart)).spawn();
+      const child = new Deno.Command("bash", {
+        ...commandOpts(unit, unit.execStart),
+        stdout: "piped",
+        stderr: "piped",
+      }).spawn();
+      relayStream(child.stdout, Deno.stdout).catch(() => {});
+      relayStream(child.stderr, Deno.stderr).catch(() => {});
       await writePid(key, child.pid);
-      const { code } = await child.status; 
+      const { code } = await child.status;
 
       if (!isWanted(key)) {
         log(`${key}: stopped (rc=${code})`);
@@ -464,10 +494,22 @@ async function seedCloudInit() {
 }
 
 async function runCloudInit() {
+  // NOTE: cloud-init v26 subcommands (init/modules) do NOT accept --quiet —
+  // passing it makes argparse print a usage error and exit non-zero, which the
+  // old `.catch(() => {})` swallowed silently. Never pass --quiet here.
   for (const stage of [["init", "--local"], ["init"], ["modules", "--mode=config"], ["modules", "--mode=final"]]) {
     log(`cloud-init ${stage.join(" ")}`);
-    await new Deno.Command("cloud-init", { args: stage, stdout: "inherit", stderr: "inherit" })
-      .output().catch(() => {});
+    const out = await new Deno.Command("cloud-init", {
+      args: stage,
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output().catch((e: unknown) => {
+      log(`cloud-init ${stage.join(" ")} ERROR: ${String(e)}`);
+      return null;
+    });
+    if (out && !out.success) {
+      log(`cloud-init ${stage.join(" ")} exited rc=${out.code}`);
+    }
   }
   log("cloud-init complete");
 }
