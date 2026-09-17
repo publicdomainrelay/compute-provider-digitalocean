@@ -1,7 +1,6 @@
 .reference
 .reference/
 node_modules/
-deno.lock
 bundle.js
 .cache/
 .claude/
