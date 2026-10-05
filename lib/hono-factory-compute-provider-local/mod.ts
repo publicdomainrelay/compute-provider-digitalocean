@@ -9,7 +9,8 @@ import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc"
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { createOidcIssuer, createOidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-hono";
-import { createRbacProvisioner } from "@publicdomainrelay/rbac-atproto";
+import { createRbacProvisioner, verifyServiceAuthOrThrow } from "@publicdomainrelay/rbac-atproto";
+import { COMPUTE_VM_NSID } from "@publicdomainrelay/compute-provider-common";
 
 export interface DropletCreateRequest {
   name: string;
@@ -152,32 +153,14 @@ export function createComputeProviderLocalFactory(
 
       app.route("/", oidcIssuer.app as unknown as Hono);
 
-      app.use("/v2/account", async (c, next) => {
+      app.use("/v2/*", async (c, next) => {
         try {
           const token = extractBearer(c.req.header("Authorization"));
-          c.set("actx", token);
+          const { actx } = await verifyServiceAuthOrThrow(token, getIssuerUrl(), COMPUTE_VM_NSID);
+          c.set("actx", actx);
           await next();
         } catch (err) {
-          return c.json({ id: "unauthorized", message: String(err) }, 401);
-        }
-      });
-
-      app.use("/v2/droplets", async (c, next) => {
-        try {
-          const token = extractBearer(c.req.header("Authorization"));
-          c.set("actx", token);
-          await next();
-        } catch (err) {
-          return c.json({ id: "unauthorized", message: String(err) }, 401);
-        }
-      });
-
-      app.use("/v2/droplets/*", async (c, next) => {
-        try {
-          const token = extractBearer(c.req.header("Authorization"));
-          c.set("actx", token);
-          await next();
-        } catch (err) {
+          log.warn("rbac denied", { path: c.req.path, error: String(err) });
           return c.json({ id: "unauthorized", message: String(err) }, 401);
         }
       });

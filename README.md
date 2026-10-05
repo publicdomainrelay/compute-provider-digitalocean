@@ -63,7 +63,10 @@ order: `--flag` > `ENV_VAR` > default.
 
 ## API
 
-All `/v2/*` routes: `Authorization: Bearer <token>` header required.
+All `/v2/*` routes: `Authorization: Bearer <token>` header required, where the token is a
+`com.atproto.server.getServiceAuth` JWT with `aud` = this host (`did:web:<host>`) and
+`lxm` = `com.publicdomainrelay.temp.compute.vm`. The caller identity (`actx`) is the key of
+the *verified* issuer DID; anything that does not verify is `401`.
 
 | Method | Path | What |
 |--------|------|------|

@@ -1,7 +1,30 @@
 import type { RbacProvisioner, StrongRef } from "@publicdomainrelay/compute-provider-abc";
 import { UnauthorizedException, type AuthToken } from "@publicdomainrelay/oidc-issuer-abc";
+import { verifyServiceAuthToken } from "@publicdomainrelay/atproto-repo-deno";
+import { serviceDidFromUrl } from "@publicdomainrelay/compute-provider-common";
 
 const RBAC_NSID = "com.fedproxy.rbac";
+
+export interface VerifiedServiceAuth {
+  iss: string;
+  actx: string;
+}
+
+export async function verifyServiceAuthOrThrow(
+  token: string,
+  serviceUrl: string,
+  lxm: string,
+): Promise<VerifiedServiceAuth> {
+  const verified = await verifyServiceAuthToken(token, {
+    audDid: serviceDidFromUrl(serviceUrl),
+    lxm,
+  });
+  if (!verified) {
+    throw new UnauthorizedException("invalid ATProto service auth token");
+  }
+  const iss = verified.iss as string;
+  return { iss, actx: iss.split(":").pop() ?? iss };
+}
 
 export interface RbacRecordOpts {
   roleName?: string;

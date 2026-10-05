@@ -14,7 +14,7 @@ import type {
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
-import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer, OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
 import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
 import { Hono } from "@hono/hono";
 import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
@@ -638,13 +638,8 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       const authHeader = c.req.header("Authorization");
       const token = (authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null);
       if (!token) return c.json({ error: "AuthenticationRequired" }, 401);
-      try {
-        const seg = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-        const payload = JSON.parse(atob(seg.padEnd(Math.ceil(seg.length / 4) * 4, "=")));
-        if (typeof payload.exp === "number" && payload.exp * 1000 < Date.now()) {
-          return c.json({ error: "TokenExpired" }, 401);
-        }
-      } catch { return c.json({ error: "InvalidToken" }, 401); }
+      const validated = await OIDCToken.validate(token).catch(() => null);
+      if (!validated) return c.json({ error: "InvalidToken" }, 401);
       let body: Record<string, unknown>;
       try { body = await c.req.json(); } catch {
         return c.json({ error: "InvalidRequest" }, 400);

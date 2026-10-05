@@ -2,9 +2,10 @@ import { createFactory } from "hono/factory";
 import { cors } from "hono/cors";
 import type { Hono } from "hono";
 import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
-import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
+import { COMPUTE_VM_NSID, ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
 import { createOidcIssuer, createOidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-hono";
+import { verifyServiceAuthOrThrow } from "@publicdomainrelay/rbac-atproto";
 
 export interface DropletCreateRequest {
   name: string;
@@ -120,32 +121,14 @@ export function createComputeProviderDigitalOceanFactory(
 
       app.route("/", oidcIssuer.app as unknown as Hono);
 
-      app.use("/v2/account", async (c, next) => {
+      app.use("/v2/*", async (c, next) => {
         try {
           const token = extractBearer(c.req.header("Authorization"));
-          c.set("actx", token);
+          const { actx } = await verifyServiceAuthOrThrow(token, getIssuerUrl(), COMPUTE_VM_NSID);
+          c.set("actx", actx);
           await next();
         } catch (err) {
-          return c.json({ id: "unauthorized", message: String(err) }, 401);
-        }
-      });
-
-      app.use("/v2/droplets", async (c, next) => {
-        try {
-          const token = extractBearer(c.req.header("Authorization"));
-          c.set("actx", token);
-          await next();
-        } catch (err) {
-          return c.json({ id: "unauthorized", message: String(err) }, 401);
-        }
-      });
-
-      app.use("/v2/droplets/*", async (c, next) => {
-        try {
-          const token = extractBearer(c.req.header("Authorization"));
-          c.set("actx", token);
-          await next();
-        } catch (err) {
+          log.warn("rbac denied", { path: c.req.path, error: String(err) });
           return c.json({ id: "unauthorized", message: String(err) }, 401);
         }
       });

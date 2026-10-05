@@ -54,15 +54,22 @@ let _jwkStore: JwkStore = createMemoryJwkStore();
 let _defaultTtlSeconds = 60 * 60 * 24;
 let _signingKey: CryptoKeyPair | null = null;
 let _publicJwk: jose.JWK | null = null;
+let _trustedIssuerUrls: string[] = [];
+
+export interface TrustedIssuerOptions {
+  trustedIssuerUrls?: string[];
+}
 
 export function configureOidc(cfg: {
   getIssuerUrl?: () => string;
   store?: JwkStore;
   defaultTtlSeconds?: number;
+  trustedIssuerUrls?: string[];
 }): void {
   if (cfg.getIssuerUrl) _getIssuerUrl = cfg.getIssuerUrl;
   if (cfg.store) _jwkStore = cfg.store;
   if (typeof cfg.defaultTtlSeconds === "number") _defaultTtlSeconds = cfg.defaultTtlSeconds;
+  if (cfg.trustedIssuerUrls) _trustedIssuerUrls = [...cfg.trustedIssuerUrls];
 }
 
 export async function getSigningKey(): Promise<CryptoKeyPair> {
@@ -192,7 +199,9 @@ export class OIDCToken implements OIDCTokenData {
     const expectedAud = `api://${api}?actx=${actx}`;
 
     const ownIssuers = [issuerUrl];
-    const extraIssuers = getIssuers ? await getIssuers(api, actx) : [];
+    const extraIssuers = (getIssuers ? await getIssuers(api, actx) : []).filter((issuer) =>
+      _trustedIssuerUrls.includes(issuer)
+    );
     const issuers = [...new Set([...ownIssuers, ...extraIssuers])];
 
     let lastErr: Error = new Error("no issuers");
@@ -537,27 +546,26 @@ export async function raiseIfUnauthorized(
     ? unverifiedPayload.aud[0]
     : unverifiedPayload.aud as string ?? "";
 
+  const caller = parseAudience(rawAud);
+  log("info", "rbac gate", { actx: caller.actx, api: caller.api, service, scope, path, method, rawAud });
+
+  // Signature first, and against configuration only. Everything below resolves a
+  // URL out of the caller's aud, so it may run only on a token that verified.
+  const signatureVerifiedToken = await OIDCToken.validate(token, async () => _trustedIssuerUrls);
+
+  const actx = signatureVerifiedToken.actx.includes(".")
+    ? "did:web:" + signatureVerifiedToken.actx
+    : "did:plc:" + signatureVerifiedToken.actx;
+
   let rbac = null;
-  let getIssuers: ((api: string, actx: string) => Promise<string[]>) | undefined;
-
-  let { actx, api } = parseAudience(rawAud);
-  if (actx.includes(".")) {
-    actx = "did:web:" + actx;
-  } else {
-    actx = "did:plc:" + actx;
-  }
-
-  log("info", "rbac gate", { actx, api, service, scope, path, method, rawAud });
-
+  let issuers: string[] = [];
   let pdsURL = "";
   try {
     pdsURL = await resolvePDS(actx, plcDirectoryUrl);
     log("info", "rbac gate resolved pds", { actx, pdsURL });
     rbac = await getRBACRecord(pdsURL, actx, service, scope, log);
-    const issuers = collectIssuers(rbac);
+    issuers = collectIssuers(rbac);
     log("info", "rbac gate issuers", { actx, issuers });
-    getIssuers = async (_api: string, _actx: string) => issuers;
-    void api;
   } catch (err) {
     log("warn", "rbac gate resolve failed", { actx, service, scope, pdsURL, error: String(err) });
     throw new UnauthorizedException(
@@ -565,23 +573,28 @@ export async function raiseIfUnauthorized(
     );
   }
 
-  const oidcToken = await OIDCToken.validate(token, getIssuers);
-  log("info", "rbac gate token validated", { actx, sub: oidcToken.sub });
-
-  if (rbac) {
-    checkRBACPolicy(rbac, oidcToken.sub, path, method);
-    log("info", "rbac gate authorized", { actx, sub: oidcToken.sub, path, method });
+  // The record's issuers narrow the trusted set for this actx; they never add to it.
+  if (issuers.length > 0) {
+    await OIDCToken.validate(token, async () =>
+      issuers.filter((issuer) => _trustedIssuerUrls.includes(issuer)));
   }
 
-  return oidcToken as AuthToken;
+  log("info", "rbac gate token validated", { actx, sub: signatureVerifiedToken.sub });
+
+  if (rbac) {
+    checkRBACPolicy(rbac, signatureVerifiedToken.sub, path, method);
+    log("info", "rbac gate authorized", { actx, sub: signatureVerifiedToken.sub, path, method });
+  }
+
+  return signatureVerifiedToken as AuthToken;
 }
 
-export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
+export function createOidcIssuer(opts: OidcIssuerOptions & TrustedIssuerOptions): OidcIssuer {
   const { getIssuerUrl, getDroplet } = opts;
   const plcDirectoryUrl = opts.plcDirectoryUrl ?? "https://plc.directory";
   const log = opts.log ?? noopLogger;
 
-  configureOidc({ getIssuerUrl });
+  configureOidc({ getIssuerUrl, trustedIssuerUrls: opts.trustedIssuerUrls });
 
   const app = new Hono<{ Variables: { authToken: AuthToken; actx: string } }>();
 
