@@ -46,7 +46,7 @@
     "@publicdomainrelay/hono-factory-package-registry": "../hono-jsr/lib/hono-factory-package-registry/mod.ts"
   },
   "tasks": {
-    "test": "deno test -A --no-check test/cli_smoke_test.ts test/oidc_workload_identity_integration_test.ts test/oidc_rbac_integration_test.ts test/oidc_rbac_container_integration_test.ts",
+    "test": "deno test -A test/cli_smoke_test.ts test/oidc_workload_identity_integration_test.ts test/oidc_rbac_integration_test.ts test/oidc_rbac_container_integration_test.ts",
     "test:cli": "deno test --allow-run --allow-read test/cli_smoke_test.ts",
     "test:integration": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/cloud_init_integration_test.ts",
     "test:oidc": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/oidc_workload_identity_integration_test.ts",
