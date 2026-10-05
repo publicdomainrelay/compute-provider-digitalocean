@@ -74,7 +74,16 @@ if (providerMode === "local") {
   app = factory.createApp();
 }
 
-const serve = createServe({ logger: log, tcp: { addr: hostname, port } });
+const serve = createServe({
+  logger: log,
+  tcp: {
+    addr: hostname,
+    port,
+    certFile: options.tlsCertFile as string | undefined,
+    keyFile: options.tlsKeyFile as string | undefined,
+  },
+  portFile: options.portFile as string | undefined,
+});
 serve.app.route("/", app as never);
 
 const signalHandler = () => {
