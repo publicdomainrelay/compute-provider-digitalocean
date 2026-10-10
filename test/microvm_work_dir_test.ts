@@ -5,6 +5,11 @@ import type { MicrovmSpec } from "@publicdomainrelay/microvm-firecracker";
 
 const RUNNER_IMAGE = "localhost/socialweb-firecracker-runner:local";
 
+// Deliberately not the spec's gateway: pasta's gateway and the host as the
+// guest's container reaches it are two different machines, and a test that
+// cannot tell them apart cannot catch the provider naming the wrong one.
+const CONTAINER_HOST = "172.17.0.1";
+
 function backendThatBoots(spec: MicrovmSpec, written: string[]): ContainerBackend {
   const result = {
     name: spec.name,
@@ -26,7 +31,7 @@ function backendThatBoots(spec: MicrovmSpec, written: string[]): ContainerBacken
     },
     inspectIp: () => Promise.resolve(spec.network.guestIp),
     inspectGateway: () => Promise.resolve(spec.network.gateway),
-    defaultGateway: () => Promise.resolve(spec.network.gateway),
+    defaultGateway: () => Promise.resolve(CONTAINER_HOST),
     imageExists: () => Promise.resolve(true),
     pullImage: () => Promise.resolve(),
     rm: () => Promise.resolve(),
@@ -95,6 +100,32 @@ Deno.test("the container a guest boots in is privileged and holds the kvm and ta
     assert(run.includes("--privileged"), `the guest's container is not privileged: ${run}`);
     assert(run.includes("/dev/kvm"), `the guest's container has no /dev/kvm: ${run}`);
     assert(run.includes("/dev/net/tun"), `the guest's container has no /dev/net/tun: ${run}`);
+  } finally {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("a guest is told to reach the host at the container's gateway, not pasta's", async () => {
+  const root = Deno.makeTempDirSync({ prefix: "microvm-hostaddr-" });
+  try {
+    const workDir = `${root}/guests/fc-test-0003`;
+    await Deno.mkdir(workDir, { recursive: true });
+    const spec = aSpec(workDir);
+    const microvm = createFirecrackerMicrovm({
+      backend: backendThatBoots(spec, []),
+      runnerImage: RUNNER_IMAGE,
+    });
+
+    // A guest's loopback is its own, so this address is where its registry fetch
+    // and its token exchange have to land to arrive at the host at all. Naming
+    // pasta's gateway instead points them at the container, whose loopback has
+    // neither, and the guest comes up with a tunnel subscriber that can never
+    // fetch itself and so never registers a tunnel.
+    assertEquals(await microvm.hostAddressForGuest(), CONTAINER_HOST);
+    assert(
+      (await microvm.hostAddressForGuest()) !== spec.network.gateway,
+      "the guest would be sent to pasta's gateway, which is the container's loopback and not the host",
+    );
   } finally {
     await Deno.remove(root, { recursive: true }).catch(() => {});
   }

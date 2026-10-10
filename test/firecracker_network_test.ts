@@ -1,5 +1,10 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { guestMacFor, networkFor, parseMemMiB } from "@publicdomainrelay/compute-provider-firecracker";
+import {
+  addressTheRequesterNamed,
+  guestMacFor,
+  networkFor,
+  parseMemMiB,
+} from "@publicdomainrelay/compute-provider-firecracker";
 
 // The guest's address is not configured by cloud-init. The firecracker base
 // image ships fcnet-setup.sh, taken from firecracker's own integration tests,
@@ -58,6 +63,25 @@ Deno.test("a MAC is derived only from an IPv4 address", () => {
   assertThrows(() => guestMacFor("172.30.0"), Error, "is not an IPv4 address");
   assertThrows(() => guestMacFor("2001:db8::1"), Error, "is not an IPv4 address");
   assertThrows(() => guestMacFor("172.30.0.256"), Error, "is not an IPv4 address");
+});
+
+Deno.test("a host address the requester already named is the one the guest is given", () => {
+  const named = [
+    "#cloud-config",
+    "bootcmd:",
+    "  - - sh",
+    "    - -c",
+    "    - grep -qxF '192.168.0.20 relay.localhost' /etc/hosts || echo '192.168.0.20 relay.localhost' >> /etc/hosts",
+  ].join("\n");
+  // The requester's line is in the document the guest boots with, and cloud-init
+  // resolves a name before the provider's own runcmd can append a line for it, so
+  // the provider has to agree with it rather than write a second, later, losing one.
+  assertEquals(addressTheRequesterNamed(named), "192.168.0.20");
+});
+
+Deno.test("a requester that named no host address leaves the provider to choose one", () => {
+  const unnamed = ["#cloud-config", "write_files:", "  - path: /etc/motd", "    content: hello"].join("\n");
+  assertEquals(addressTheRequesterNamed(unnamed), undefined);
 });
 
 Deno.test("the memory an RFP asks for is read in the units the lexicon writes it in", () => {

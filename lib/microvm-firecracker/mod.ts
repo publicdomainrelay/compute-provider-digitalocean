@@ -41,6 +41,20 @@ export interface Microvm {
   readonly name: string;
   boot(spec: MicrovmSpec): Promise<MicrovmResult>;
   stop(workDir: string): Promise<void>;
+
+  /**
+   * The address a guest of this microvm reaches THIS HOST at.
+   *
+   * A guest's loopback is its own, so the names it resolves to the host -- the
+   * package registry it fetches its tunnel subscriber from, the issuer it
+   * exchanges a provisioning token with -- have to be written against an
+   * address that leaves the guest. The guest's traffic leaves through pasta
+   * into the container this module starts it in, and that container reaches
+   * the host at its default gateway, so that is the address: pasta's own
+   * gateway is a different machine entirely, the container, and naming it
+   * gives the guest a host that answers nothing.
+   */
+  hostAddressForGuest(): Promise<string>;
 }
 
 export interface FirecrackerMicrovmOptions {
@@ -255,6 +269,12 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
         `guest ${spec.name} had not reported a result ${bootTimeoutMs}ms after its container ` +
           `started. Its output:\n${await containerLogs(container)}`,
       );
+    },
+    hostAddressForGuest(): Promise<string> {
+      // This module starts the guest's container without a --network flag, so it
+      // lands on the runtime's default bridge and the host is that bridge's
+      // gateway. Both facts live here, so they cannot drift apart.
+      return backend.defaultGateway();
     },
     async stop(workDir: string): Promise<void> {
       let container = "";

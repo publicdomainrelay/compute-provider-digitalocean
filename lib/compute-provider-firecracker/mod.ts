@@ -492,6 +492,20 @@ export function preinstallManifest(input: PreinstallManifestInput): PreinstallMa
   };
 }
 
+/**
+ * The address a requester already named for this host, if it named one.
+ *
+ * A requester can put the host in the guest's /etc/hosts itself -- the market
+ * harness passes `guestHostAliases` as `<address> relay.localhost` and does so
+ * precisely because a NodeClaim carries no such thing. When it has, that line is
+ * in the document the guest boots with, and cloud-init resolves a name before
+ * the step below can append a line for it, so a second line is a line that never
+ * wins: the requester's address has to be the one this provider names too.
+ */
+export function addressTheRequesterNamed(userData: string): string | undefined {
+  return /(\d+\.\d+\.\d+\.\d+)\s+relay\.localhost/.exec(userData)?.[1];
+}
+
 function pointGuestAtHost(userData: string, gateway: string, guestTlsPort?: number): string {
   const patched = guestTlsPort
     ? userData.replace(/https:\/\/([a-z0-9.-]+\.localhost)(?![:.\w-])/gi, `https://$1:${guestTlsPort}`)
@@ -562,9 +576,6 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
    * the cloud-config is the host's own address as the guest sees it; a guest
    * whose packets reach the gateway address instead can dial that.
    */
-  function hostAddressForGuest(userData: string, gateway: string): string {
-    return /(\d+\.\d+\.\d+\.\d+)\s+relay\.localhost/.exec(userData)?.[1] ?? gateway;
-  }
 
   async function ensureImage(): Promise<string> {
     const status = await image.ensure({ reuseStale: ctx.reuseStale });
@@ -629,11 +640,17 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
       ctx.getIssuerUrl(),
     );
     await jsrRegistryReady;
-    const withJsr = injectJsrUrl(
-      reported,
-      `http://${hostAddressForGuest(reported, network.gateway)}:${jsrPort}`,
-    );
-    const userData = pointGuestAtHost(withJsr, network.gateway, ctx.guestTlsPort);
+    // Every name the guest resolves to this host is written against one address.
+    // A requester that already named one (the harness passes `guestHostAliases`)
+    // is kept: its line is in the document the guest boots with, and cloud-init
+    // resolves a name before this step's runcmd can append a second line for it,
+    // so the later line would be the one that never wins. With no such line, the
+    // host is at the container's own gateway, which is where a guest that leaves
+    // through pasta actually arrives -- see Microvm.hostAddressForGuest.
+    const hostAddress = addressTheRequesterNamed(reported) ?? await ctx.microvm.hostAddressForGuest();
+    const withJsr = injectJsrUrl(reported, `http://${hostAddress}:${jsrPort}`);
+    const userData = pointGuestAtHost(withJsr, hostAddress, ctx.guestTlsPort);
+    logger.info("guest_host_address", { name, hostAddress, jsrPort });
     await Deno.writeTextFile(userDataFile, userData);
 
     logger.info("provisioning microvm", { name, guestIp: network.guestIp, cpus: vm.cpus, mem: vm.mem });
