@@ -151,7 +151,9 @@ async function runArm(arm: Arm): Promise<void> {
     serviceUrl: issuerUrl,
     plcDirectoryUrl,
     log: (level, message, meta) => {
-      console.log(`[${arm}][issuer][${level}] ${message} ${JSON.stringify(meta ?? {})}`);
+      if (level === "warn" || level === "error") {
+        console.log(`[${arm}][issuer][${level}] ${message} ${JSON.stringify(meta ?? {})}`);
+      }
     },
   });
   const issuerAc = new AbortController();
@@ -208,19 +210,6 @@ async function runArm(arm: Arm): Promise<void> {
 
     const callbackUrl = `http://${gatewayIp}:${callbackPort}/token`;
     const tokenPath = "/root/secrets/digitalocean.com/serviceaccount/token";
-    const diagnostic = Deno.env.get("VM_ARM_DIAG")
-      ? `  - |
-    exec > /dev/console 2>&1
-    echo "===DIAG START==="
-    date -u
-    ip route
-    ss -ltn 2>/dev/null | head -8
-    ssh-keyscan -t ed25519 -p 22 127.0.0.1 2>&1 | head -2
-    curl -s -o /dev/null -w 'issuer http=%{http_code}' --max-time 10 "${issuerUrl}/"
-    echo
-    echo "===DIAG END==="
-`
-      : "";
     const baseUserData = `#cloud-config
 users:
   - name: root
@@ -229,7 +218,7 @@ users:
     lock_passwd: false
 ssh_pwauth: true
 runcmd:
-${diagnostic}  - |
+  - |
     while [ ! -f ${tokenPath} ]; do sleep 3; done
     curl -sf --json "{\\"token\\":\\"$(cat ${tokenPath})\\"}" ${callbackUrl}
 `;
