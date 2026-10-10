@@ -25,6 +25,7 @@ import { createServe, type ServeHandle } from "@publicdomainrelay/serve";
 // requires Docker. It is separate from the container management abstraction.
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
+import { qemuCacheDir } from "@publicdomainrelay/qemu-standalone";
 
 function didWebToHttps(didOrUrl: string): string {
   return didOrUrl.startsWith("did:web:") ? "https://" + didOrUrl.slice("did:web:".length) : didOrUrl;
@@ -593,7 +594,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     "container-runner-ubuntu:latest";
   const cacheDir = ctx.cacheDir ??
     Deno.env.get("CACHE_DIR") ??
-    defaultCacheDir();
+    qemuCacheDir();
   // Port of the dedicated JSR TCP+TLS serve (set during serve.onConnected).
   let _jsrPort = 0;
 

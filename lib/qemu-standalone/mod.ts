@@ -20,7 +20,7 @@ function resolveHome(): string {
   return home;
 }
 
-function defaultCacheDir(): string {
+export function qemuCacheDir(): string {
   return `${resolveHome()}/.cache/simple-qemu`;
 }
 
@@ -212,7 +212,7 @@ export async function buildImage(
   cacheDir?: string,
 ): Promise<void> {
   const cfg = DISTRO_CONFIGS[distro];
-  const CACHE_DIR = cacheDir ?? defaultCacheDir();
+  const CACHE_DIR = cacheDir ?? qemuCacheDir();
   const CHROOT_DIR = `${CACHE_DIR}/my-chroot-${distro}`;
   const LIVEOS_IMG = `${CACHE_DIR}/liveos-${distro}.img`;
 
@@ -438,7 +438,7 @@ export async function runVM(
   cacheDir?: string,
 ): Promise<void> {
   const cfg = DISTRO_CONFIGS[distro];
-  const CACHE_DIR = cacheDir ?? defaultCacheDir();
+  const CACHE_DIR = cacheDir ?? qemuCacheDir();
   const CHROOT_DIR = `${CACHE_DIR}/my-chroot-${distro}`;
   const LIVEOS_IMG = `${CACHE_DIR}/liveos-${distro}.img`;
 
