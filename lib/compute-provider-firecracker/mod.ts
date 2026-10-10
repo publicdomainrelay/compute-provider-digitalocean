@@ -19,7 +19,7 @@ import type {
 import type { NodeImageStore } from "@publicdomainrelay/node-image-abc";
 import type { Microvm } from "@publicdomainrelay/microvm-firecracker";
 import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
-import { OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer, OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import { DEFAULT_ACCEPT_PATH_VM } from "@publicdomainrelay/secrets-common";
 import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
@@ -90,6 +90,18 @@ interface Guest {
   workDir: string;
   network: { guestIp: string; gateway: string; pastaIp: string; prefix: number; guestMac: string };
   userDataFile: string;
+  /**
+   * The requester's PLC and the role it asked for, kept because the issuer's
+   * prove handler reads them back off the droplet to rebuild the subject the
+   * guest's provisioning token carries. A guest whose droplet has neither is a
+   * guest the issuer cannot name, and its token exchange is refused.
+   */
+  requesterPlc: string;
+  role: string;
+}
+
+function didWebToHttps(didOrUrl: string): string {
+  return didOrUrl.startsWith("did:web:") ? "https://" + didOrUrl.slice("did:web:".length) : didOrUrl;
 }
 
 const PREFIX_BITS = 30;
@@ -674,7 +686,14 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
       throw cause;
     }
     enriched.associateWithDroplet(name);
-    const guest: Guest = { name, workDir, network, userDataFile };
+    const guest: Guest = {
+      name,
+      workDir,
+      network,
+      userDataFile,
+      requesterPlc: requesterDid.split(":").pop() ?? "",
+      role: vm.role,
+    };
     guests.set(name, guest);
 
     let rbacRef: StrongRef | undefined;
@@ -809,8 +828,46 @@ export function parseMemMiB(mem: unknown): number | undefined {
 
 export function createFirecrackerComputeProvider(ctx: ComputeProviderFirecrackerCtx) {
   const inner = createComputeProviderFirecracker(ctx);
-  ctx.serve.onConnected(() => {
+
+  // The droplet the issuer sees, which is not the droplet the market sees: the
+  // prove handler resolves the guest's ssh host key by scanning it from inside
+  // the container the guest runs in, so it needs that container's name, and it
+  // rebuilds the subject of the token it issues out of the oidc-sub tags. Both
+  // are properties of the guest this provider already holds.
+  const dropletForIssuer = (id: string): Record<string, unknown> | undefined => {
+    const guest = inner.guests.get(id);
+    if (!guest) return undefined;
+    return {
+      id,
+      containerName: guest.name,
+      tags: [`oidc-sub:plc:${guest.requesterPlc}`, `oidc-sub:role:${guest.role}`],
+      networks: { v4: [{ ip_address: guest.network.guestIp, type: "public" }] },
+    };
+  };
+
+  ctx.serve.onConnected((ingressRef) => {
     inner.onConnected(ctx.serve.app);
+
+    // The guest's user_data carries provisioning-token.service, which exchanges
+    // the token it is handed at <issuer>/v1/oidc/prove for one that names the
+    // requester's PLC and the role, and setup-secrets.service fetches the
+    // accept bundle with it. The other providers that compose that same
+    // user_data -- local and digitalocean -- each mount this issuer on their own
+    // serve; without it here the route the guest is told to call answers 404,
+    // the token exchange fails, no accept bundle is ever written, and the guest
+    // reports no tunnel address, which reads as a guest that never joined
+    // rather than as an issuer that was never mounted.
+    const oidcIssuer = createOidcIssuer({
+      getIssuerUrl: ctx.getIssuerUrl,
+      getDroplet: dropletForIssuer,
+      serviceUrl: didWebToHttps(ingressRef),
+      log: (level: string, msg: string, extra?: Record<string, unknown>) => {
+        const at = level as "info" | "warn" | "error" | "debug";
+        if (typeof ctx.logger?.[at] === "function") ctx.logger[at](msg, extra);
+      },
+    });
+    ctx.serve.app.route("/", oidcIssuer.app as never);
+    ctx.logger?.info("firecracker oidc issuer mounted", { serviceUrl: didWebToHttps(ingressRef) });
   });
   const provider: ComputeProvider = {
     name: "firecracker",
@@ -822,10 +879,7 @@ export function createFirecrackerComputeProvider(ctx: ComputeProviderFirecracker
     createBidConfig: inner.createBidConfig,
     injectAcceptBundle: (userData: string, bundle: Record<string, unknown>) =>
       injectAcceptBundle(userData, bundle, ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM),
-    getDroplet: (id: string) => {
-      const guest = inner.guests.get(id);
-      return guest ? { id, networks: { v4: [{ ip_address: guest.network.guestIp, type: "public" }] } } : undefined;
-    },
+    getDroplet: dropletForIssuer,
     setup: async () => {
       await inner.ensureImage();
     },
