@@ -34,7 +34,7 @@ export const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
 
 export const SUBMIT_EVENT_NSID = "com.publicdomainrelay.temp.market.submitEvent";
 
-export const SECRETS_PREFIX = "/root/secrets/firecracker/serviceaccount";
+export const SECRETS_PREFIX = "/root/secrets/digitalocean.com/serviceaccount";
 
 export interface GuestContractEntry {
   receiptKey: string;
