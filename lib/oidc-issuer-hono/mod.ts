@@ -52,8 +52,8 @@ let _getIssuerUrl: () => string = () => {
 };
 let _jwkStore: JwkStore = createMemoryJwkStore();
 let _defaultTtlSeconds = 60 * 60 * 24;
-let _signingKey: CryptoKeyPair | null = null;
-let _publicJwk: jose.JWK | null = null;
+let _signingKey: Promise<CryptoKeyPair> | null = null;
+let _publicJwk: Promise<jose.JWK> | null = null;
 let _trustedIssuerUrls: string[] = [];
 
 export interface TrustedIssuerOptions {
@@ -72,9 +72,15 @@ export function configureOidc(cfg: {
   if (cfg.trustedIssuerUrls) _trustedIssuerUrls = [...cfg.trustedIssuerUrls];
 }
 
-export async function getSigningKey(): Promise<CryptoKeyPair> {
-  if (_signingKey) return _signingKey;
+export function getSigningKey(): Promise<CryptoKeyPair> {
+  _signingKey ??= loadOrGenerateSigningKey().catch((err) => {
+    _signingKey = null;
+    throw err;
+  });
+  return _signingKey;
+}
 
+async function loadOrGenerateSigningKey(): Promise<CryptoKeyPair> {
   const issuer = _getIssuerUrl();
   const storedPem = _jwkStore.getJwkPem(issuer);
   if (storedPem) {
@@ -92,28 +98,33 @@ export async function getSigningKey(): Promise<CryptoKeyPair> {
       { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
       true, ["verify"],
     );
-    _signingKey = { privateKey: priv, publicKey: pub };
-  } else {
-    _signingKey = await crypto.subtle.generateKey(
-      { name: "RSASSA-PKCS1-v1_5", modulusLength: 4096, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
-      true,
-      ["sign", "verify"],
-    );
-    const pem = await jose.exportPKCS8(_signingKey.privateKey);
-    _jwkStore.saveJwkPem(issuer, pem);
+    return { privateKey: priv, publicKey: pub };
   }
-  return _signingKey;
+  const generated = await crypto.subtle.generateKey(
+    { name: "RSASSA-PKCS1-v1_5", modulusLength: 4096, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const pem = await jose.exportPKCS8(generated.privateKey);
+  _jwkStore.saveJwkPem(issuer, pem);
+  return generated;
 }
 
-export async function getPublicJwk(): Promise<jose.JWK> {
-  if (_publicJwk) return _publicJwk;
+export function getPublicJwk(): Promise<jose.JWK> {
+  _publicJwk ??= derivePublicJwk().catch((err) => {
+    _publicJwk = null;
+    throw err;
+  });
+  return _publicJwk;
+}
+
+async function derivePublicJwk(): Promise<jose.JWK> {
   const keys = await getSigningKey();
   const jwk = await jose.exportJWK(keys.publicKey);
   jwk.use = "sig";
   jwk.alg = "RS256";
   jwk.kid = await jose.calculateJwkThumbprint(jwk);
-  _publicJwk = jwk;
-  return _publicJwk;
+  return jwk;
 }
 
 const jwksCache = new Map<string, ReturnType<typeof jose.createRemoteJWKSet>>();
