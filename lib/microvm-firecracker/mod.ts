@@ -141,10 +141,10 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
   if (!opts.runnerImage) {
     throw new Error(
       "createFirecrackerMicrovm needs the image the guest is booted in. The guest is a firecracker " +
-        "microVM, and booting one needs /dev/kvm, /dev/net/tun and the network capabilities that " +
-        "pasta's tap setup uses. This process does not run with those, and must not: it runs where " +
-        "the bidder runs. The container is given them instead, one per guest, exactly as the QEMU " +
-        "provider and the local provider already do.",
+        "microVM, and booting one needs /dev/kvm, /dev/net/tun and a privileged container for the " +
+        "namespaces pasta sandboxes itself into. This process does not run with those, and must " +
+        "not: it runs where the bidder runs. The container is given them instead, one per guest, " +
+        "exactly as the QEMU provider and the local provider already do.",
     );
   }
   const backend = opts.backend;
@@ -192,8 +192,17 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
         "--name", container,
         "--device", "/dev/kvm",
         "--device", "/dev/net/tun",
-        "--cap-add", "NET_ADMIN",
-        "--security-opt", "seccomp=unconfined",
+        // Privileged, because the launcher runs pasta and pasta sandboxes itself:
+        // it clones into a user, pid and mount namespace of its own, mounts a fresh
+        // /proc there and remakes / private before it starts the VMM. Measured on
+        // the host that boots these guests, no subset of capabilities does it --
+        // --cap-add NET_ADMIN, + SYS_ADMIN, + SETUID and SETGID all die at
+        // "Failed to remount /: Permission denied" and then "Failed to sandbox
+        // process, exiting", which is pasta refusing to run a VMM it could not
+        // contain, while --privileged gets through every one of those steps. The
+        // sibling providers that boot a VM in a container (compute-provider-local,
+        // qemu-standalone) are privileged for the same reason.
+        "--privileged",
         "-v", `${spec.imageDir}:${spec.imageDir}:ro`,
         "-v", `${spec.workDir}:${spec.workDir}`,
         runnerImage,
@@ -207,8 +216,8 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
         throw new Error(
           `starting the container that boots guest ${spec.name} failed: ${started.stderr.trim()} ` +
             `-- the guest is only ever a process inside a container, because booting one needs ` +
-            `/dev/kvm, /dev/net/tun and the capabilities pasta's tap setup uses, and the bidder ` +
-            `does not run with those`,
+            `/dev/kvm, /dev/net/tun and a privileged container for the namespaces pasta sandboxes ` +
+            `itself into, and the bidder does not run with those`,
         );
       }
 

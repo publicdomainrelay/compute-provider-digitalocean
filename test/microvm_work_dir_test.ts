@@ -20,7 +20,7 @@ function backendThatBoots(spec: MicrovmSpec, written: string[]): ContainerBacken
     type: "docker",
     bin: "docker",
     command: (args: string[]) => {
-      written.push(args[0]);
+      written.push(args.join(" "));
       if (args[0] === "run") Deno.writeTextFileSync(`${spec.workDir}/result.json`, JSON.stringify(result));
       return Promise.resolve({ code: 0, stdout: "", stderr: "" });
     },
@@ -66,9 +66,35 @@ Deno.test("the work directory a guest is booted in is writable from inside its c
     const result = await microvm.boot(aSpec(workDir));
 
     assertEquals(result.guestIp, "172.30.0.2");
-    assert(written.includes("run"), "the guest boots in a container");
+    assert(written.some((line) => line.startsWith("run ")), "the guest boots in a container");
     const mode = (await Deno.stat(workDir)).mode! & 0o777;
     assertEquals(mode, 0o777, `the work directory is ${mode.toString(8)}, not 777`);
+  } finally {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("the container a guest boots in is privileged and holds the kvm and tap devices", async () => {
+  const root = Deno.makeTempDirSync({ prefix: "microvm-flags-" });
+  try {
+    const workDir = `${root}/guests/fc-test-0002`;
+    await Deno.mkdir(workDir, { recursive: true });
+
+    const written: string[] = [];
+    const microvm = createFirecrackerMicrovm({
+      backend: backendThatBoots(aSpec(workDir), written),
+      runnerImage: RUNNER_IMAGE,
+    });
+    await microvm.boot(aSpec(workDir));
+
+    const run = written.find((line) => line.startsWith("run ")) ?? "";
+    // pasta sandboxes itself in namespaces of its own and mounts a fresh /proc
+    // inside them. Measured on the host that boots these guests: no capability
+    // subset gets past "Failed to remount /", only --privileged does, and the
+    // launcher is an unprivileged user that still needs both devices.
+    assert(run.includes("--privileged"), `the guest's container is not privileged: ${run}`);
+    assert(run.includes("/dev/kvm"), `the guest's container has no /dev/kvm: ${run}`);
+    assert(run.includes("/dev/net/tun"), `the guest's container has no /dev/net/tun: ${run}`);
   } finally {
     await Deno.remove(root, { recursive: true }).catch(() => {});
   }
