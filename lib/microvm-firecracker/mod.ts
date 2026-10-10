@@ -18,6 +18,8 @@ export interface MicrovmSpec {
   userDataFile: string;
   vcpu?: number;
   memMib?: number;
+
+  diskMib?: number;
   instanceTimeoutSec?: number;
   pastaArgs?: string[];
   network: MicrovmNetwork;
@@ -60,6 +62,8 @@ interface WireSpec {
   user_data_file: string;
   vcpu?: number;
   mem_mib?: number;
+
+  disk_mib?: number;
   instance_timeout_sec?: number;
   pasta_args?: string[];
   network: {
@@ -83,6 +87,8 @@ function toWire(spec: MicrovmSpec, firecracker: string): WireSpec {
     user_data_file: spec.userDataFile,
     vcpu: spec.vcpu,
     mem_mib: spec.memMib,
+
+    disk_mib: spec.diskMib,
     instance_timeout_sec: spec.instanceTimeoutSec,
     pasta_args: spec.pastaArgs,
     network: {

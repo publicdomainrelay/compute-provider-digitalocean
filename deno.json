@@ -64,6 +64,6 @@
     "test:integration:qemu": "deno test -A test/cloud_init_qemu_integration_test.ts",
     "build:vm": "deno compile -A --output=hono-qemu-standalone/qemu-standalone hono-qemu-standalone/mod.ts && docker build --pull -f hono-qemu-standalone/Dockerfile -t atcr.io/johnandersen777.bsky.social/ccripoc-qemu-runner:latest hono-qemu-standalone",
     "test:all": "deno test --allow-run --allow-read --allow-env --allow-write --allow-net test/",
-    "build:firecracker-runner": "CGO_ENABLED=0 go build -C ../socialweb-computer-kcp -o \"$PWD/hono-firecracker-standalone/socialweb-nodeboot\" ./cmd/socialweb-nodeboot && install -m 0755 ${FIRECRACKER:-$HOME/kcp-image/artifacts/bin/firecracker} hono-firecracker-standalone/firecracker && docker build -f hono-firecracker-standalone/Dockerfile -t ${RUNNER_IMAGE:-atcr.io/johnandersen777.bsky.social/socialweb-firecracker-runner:latest} hono-firecracker-standalone"
+    "build:firecracker-runner": "sh -ec 'CGO_ENABLED=0 go build -C ../socialweb-computer-kcp -o \"$PWD/hono-firecracker-standalone/socialweb-nodeboot\" ./cmd/socialweb-nodeboot; install -m 0755 \"${FIRECRACKER:-$HOME/kcp-image/artifacts/bin/firecracker}\" hono-firecracker-standalone/firecracker; docker build -f hono-firecracker-standalone/Dockerfile -t \"${RUNNER_IMAGE:-atcr.io/johnandersen777.bsky.social/socialweb-firecracker-runner:latest}\" hono-firecracker-standalone'"
   }
 }

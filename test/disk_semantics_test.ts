@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import { createFirecrackerComputeProvider } from "@publicdomainrelay/compute-provider-firecracker";
 import type { ComputeAtproto } from "@publicdomainrelay/compute-provider-abc";
 import type { Microvm, MicrovmSpec } from "@publicdomainrelay/microvm-firecracker";
@@ -72,30 +72,23 @@ const VM = {
   user_data: "#cloud-config\nruncmd:\n  - [ sh, -c, \"true\" ]\n",
 };
 
-Deno.test("a disk bigger than the image is refused rather than silently undersized", async () => {
+Deno.test("a contract that asks for a bigger disk boots a guest grown to it", async () => {
   const booted: MicrovmSpec[] = [];
   const provider = aProvider("present", booted);
-  const err = await assertRejects(() => provider.provision({ ...VM, disk: "4G" }, "did:plc:requester")) as Error;
-  assertEquals(booted.length, 0, "a guest was booted, so the refusal happened after the VM was placed");
-  assert(
-    err.message.includes("4G") && err.message.includes(`${ROOTFS_MIB} MiB`),
-    `the refusal does not say what was asked for and what the image holds: ${err.message}`,
+  await provider.provision({ ...VM, disk: "4G" }, "did:plc:requester");
+  assertEquals(
+    booted[0].diskMib,
+    4096,
+    `the contract asks for 4G and the guest was booted from the image's own 2048 MiB filesystem, ` +
+      `which is the size it would keep: nothing downstream of this asks for the disk again`,
   );
 });
 
-Deno.test("a disk the image can hold is provisioned", async () => {
-  const booted: MicrovmSpec[] = [];
-  const provider = aProvider("present", booted);
-  const result = await provider.provision({ ...VM, disk: "2G" }, "did:plc:requester");
-  assertEquals(booted.length, 1);
-  assertEquals((result.metadata as Record<string, unknown>).mode, "firecracker");
-});
-
-Deno.test("a reused image is measured as well as a present one", async () => {
+Deno.test("a reused image is asked for the contract's disk as well as a present one", async () => {
   const booted: MicrovmSpec[] = [];
   const provider = aProvider("reused", booted);
-  await assertRejects(() => provider.provision({ ...VM, disk: "8G" }, "did:plc:requester"));
-  assertEquals(booted.length, 0);
+  await provider.provision({ ...VM, disk: "8G" }, "did:plc:requester");
+  assertEquals(booted[0].diskMib, 8192);
 });
 
 Deno.test("a disk named in a spelling nothing parses is left to the guest's own", async () => {
@@ -103,9 +96,21 @@ Deno.test("a disk named in a spelling nothing parses is left to the guest's own"
   const provider = aProvider("present", booted);
   await provider.provision({ ...VM, disk: "as much as fits" }, "did:plc:requester");
   assertEquals(
-    booted.length,
-    1,
-    "a disk the provider cannot read is not a disk this can hold a contract to, and refusing over " +
-      "one would be refusing over a spelling rather than over a size",
+    booted[0].diskMib,
+    undefined,
+    "a disk the provider cannot read is not a size to grow a filesystem to, and growing to a " +
+      "guess is growing to a number nobody asked for",
+  );
+});
+
+Deno.test("the contract's number is what is passed on, whatever it is", async () => {
+  const booted: MicrovmSpec[] = [];
+  const provider = aProvider("present", booted);
+  await provider.provision({ ...VM, disk: "1G" }, "did:plc:requester");
+  assertEquals(
+    booted[0].diskMib,
+    1024,
+    "the provider passes the contract's number on and the guest's own tool grows only what has to " +
+      "grow: shrinking is not something this does, and the runner is what decides that",
   );
 });

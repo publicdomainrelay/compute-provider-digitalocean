@@ -374,17 +374,8 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     return status.dir;
   }
 
-  function refuseADiskBiggerThanTheImage(name: string, disk: string): void {
-    const wanted = parseMemMiB(disk);
-    if (wanted === undefined || imageRootfsMiB === undefined || wanted <= imageRootfsMiB) return;
-    throw new Error(
-      `the RFP for ${name} asks for a ${disk} disk and nothing here resizes a guest's filesystem: ` +
-        `every guest boots a copy of the image's own rootfs template, which is ${imageRootfsMiB} MiB, ` +
-        `and the builder sizes that with rootfs_headroom_mib in the configuration this provider was ` +
-        `started with. Booting it anyway is a guest whose filesystem is smaller than the contract ` +
-        `says, and the contract is what the requester paid attention to: it fills up under its own ` +
-        `workload and fails to write, with the reason inside the guest rather than here.`,
-    );
+  function diskTheGuestIsAskedFor(disk: string): number | undefined {
+    return parseMemMiB(disk);
   }
 
   async function createBidConfig(nowIso: string): Promise<StrongRef> {
@@ -430,7 +421,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
 
     logger.info("provisioning microvm", { name, guestIp: network.guestIp, cpus: vm.cpus, mem: vm.mem });
     const dir = imageDir ?? (await ensureImage());
-    refuseADiskBiggerThanTheImage(name, vm.disk);
+    const diskMib = diskTheGuestIsAskedFor(vm.disk);
     let booted;
     try {
       booted = await microvm.boot({
@@ -440,6 +431,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
         userDataFile,
         vcpu: typeof vm.cpus === "number" && vm.cpus > 0 ? vm.cpus : undefined,
         memMib: parseMemMiB(vm.mem),
+        diskMib,
         pastaArgs: ["-t", `${GUEST_SSH_BIND}/${GUEST_SSH_PORT}:${network.guestIp}`],
         network,
       });
