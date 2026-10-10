@@ -1,6 +1,12 @@
 import { Hono } from "@hono/hono";
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import { acceptBundleModule, buildUserData } from "@publicdomainrelay/cloud-init-common";
+import { acceptBundleModule, buildUserData, getUserDataModules } from "@publicdomainrelay/cloud-init-common";
+import type {
+  CloudInitContext,
+  UserDataModule,
+  UserDataPatch,
+  WriteFileEntry,
+} from "@publicdomainrelay/cloud-init-common";
 import type {
   ComputeAtproto,
   ComputeProvider,
@@ -142,6 +148,166 @@ export function injectAcceptBundle(
   acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
 ): string {
   return buildUserData({ base: userData, modules: [acceptBundleModule(acceptPathVm, bundle)] });
+}
+
+export interface PreinstallFile {
+  path: string;
+  mode?: string;
+  content?: string;
+  source?: string;
+}
+
+export interface PreinstallManifest {
+  packages: string[];
+  files: PreinstallFile[];
+  runs: string[];
+  leftToBoot: { packages: string[]; files: string[]; runs: string[] };
+}
+
+export interface PreinstallManifestInput {
+  modules: string[];
+  ctx?: Partial<CloudInitContext>;
+  base?: Partial<Omit<PreinstallManifest, "leftToBoot">>;
+}
+
+export function shellCommandLine(entry: unknown, moduleId: string): string {
+  if (typeof entry === "string") return entry;
+  if (Array.isArray(entry)) {
+    if (entry.some((part) => typeof part !== "string")) {
+      throw new Error(
+        `the user-data module ${moduleId} prepends a command whose arguments are not all strings: ${
+          JSON.stringify(entry)
+        }. The preinstall runs these during the build, and a build step that is not a string is one ` +
+          `this cannot render as the shell command the manifest carries.`,
+      );
+    }
+    return entry.map((part) => `'${String(part).replaceAll("'", `'\\''`)}'`).join(" ");
+  }
+  throw new Error(
+    `the user-data module ${moduleId} prepends a runcmd entry that is neither a string nor an argv ` +
+      `array: ${JSON.stringify(entry)}. Both spellings are commands the guest would run at boot, and ` +
+      `a third spelling is one this would bake as nothing while the boot-time copy still ran.`,
+  );
+}
+
+function preinstallFileFor(moduleId: string, entry: WriteFileEntry): PreinstallFile {
+  if (typeof entry.path !== "string" || !entry.path.startsWith("/")) {
+    throw new Error(
+      `the user-data module ${moduleId} writes ${JSON.stringify(entry.path)}, which is not an ` +
+        `absolute path inside the guest. The build writes preinstalled files into the staged rootfs ` +
+        `at that path, so a relative one would land wherever the build was running.`,
+    );
+  }
+  const owner = entry.owner === undefined ? "root:root" : String(entry.owner);
+  if (owner !== "root:root" && owner !== "root") {
+    throw new Error(
+      `the user-data module ${moduleId} writes ${entry.path} owned by ${owner}, and the preinstall ` +
+        `manifest has no owner: the build writes these files as root, so baking this one would bake ` +
+        `a file whose owner is not the one the module asked for, and the difference would show up ` +
+        `only inside a guest as a service that cannot read its own config.`,
+    );
+  }
+  if (typeof entry.content !== "string") {
+    throw new Error(
+      `the user-data module ${moduleId} writes ${entry.path} with no content in the user_data, so ` +
+        `there is nothing to bake there. The preinstall carries content or a source, and the source ` +
+        `spelling exists for a file too large to sit in a JSON manifest.`,
+    );
+  }
+  return {
+    path: entry.path,
+    mode: entry.permissions === undefined ? undefined : String(entry.permissions),
+    content: entry.content,
+  };
+}
+
+interface ModuleContribution {
+  packages: string[];
+  files: Map<string, PreinstallFile>;
+  runs: string[];
+}
+
+function contributionOf(ids: string[], ctx: Partial<CloudInitContext>): ModuleContribution {
+  const packages: string[] = [];
+  const files = new Map<string, PreinstallFile>();
+  const runs: string[] = [];
+  for (const id of ids) {
+    const patch: UserDataPatch = getUserDataModules([id])[0](ctx);
+    const apt = patch.apt as Record<string, unknown> | undefined;
+    if (apt !== undefined && apt.sources !== undefined) {
+      throw new Error(
+        `the user-data module ${id} adds apt sources, and the preinstall has none: the image ` +
+          `carries no repository of its own, so a package from that source cannot be baked and the ` +
+          `guest would reach the network for it at first boot -- which is the boot this manifest ` +
+          `exists to make unnecessary. Bake the package into the base image instead.`,
+      );
+    }
+    for (const name of patch.packages ?? []) {
+      if (!packages.includes(name)) packages.push(name);
+    }
+    for (const entry of patch.write_files ?? []) {
+      const file = preinstallFileFor(id, entry);
+      files.set(file.path, file);
+    }
+    for (const entry of patch.runcmdPrepend ?? []) {
+      runs.unshift(shellCommandLine(entry, id));
+    }
+  }
+  return { packages, files, runs };
+}
+
+export function preinstallManifest(input: PreinstallManifestInput): PreinstallManifest {
+  for (const module of input.modules) {
+    if (typeof module !== "string") {
+      throw new Error(
+        `preinstallManifest was given a module function rather than the id of a registered one, and ` +
+          `a function closes over whatever it was built for: acceptBundleModule carries one ` +
+          `contract's bundle inside it, so a derivation that accepted functions could bake one ` +
+          `guest's accept.json into every guest's image. Derive from ids, which name modules the ` +
+          `image can carry, and leave per-contract values to the boot-time user_data.`,
+      );
+    }
+  }
+  const ctx = input.ctx ?? {};
+  const wanted = contributionOf(input.modules, ctx);
+  const withoutInstanceValues = contributionOf(input.modules, {});
+
+  const packages = [...(input.base?.packages ?? [])];
+  const leftPackages: string[] = [];
+  for (const name of wanted.packages) {
+    if (withoutInstanceValues.packages.includes(name)) {
+      if (!packages.includes(name)) packages.push(name);
+    } else {
+      leftPackages.push(name);
+    }
+  }
+
+  const files = [...(input.base?.files ?? [])];
+  const leftFiles: string[] = [];
+  for (const [path, file] of wanted.files) {
+    const same = withoutInstanceValues.files.get(path);
+    if (same !== undefined && same.content === file.content && same.mode === file.mode) {
+      const at = files.findIndex((existing) => existing.path === path);
+      if (at >= 0) files[at] = file;
+      else files.push(file);
+    } else {
+      leftFiles.push(path);
+    }
+  }
+
+  const runs = [...(input.base?.runs ?? [])];
+  const leftRuns: string[] = [];
+  for (const [index, run] of wanted.runs.entries()) {
+    if (withoutInstanceValues.runs[index] === run) runs.push(run);
+    else leftRuns.push(run);
+  }
+
+  return {
+    packages,
+    files,
+    runs,
+    leftToBoot: { packages: leftPackages, files: leftFiles, runs: leftRuns },
+  };
 }
 
 function pointGuestAtHost(userData: string, gateway: string, guestTlsPort?: number): string {
