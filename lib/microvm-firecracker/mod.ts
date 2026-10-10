@@ -1,3 +1,5 @@
+import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
+
 export interface MicrovmNetwork {
   guestIp: string;
   prefix: number;
@@ -29,6 +31,7 @@ export interface MicrovmResult {
   socket: string;
   console: string;
   workDir: string;
+  container: string;
 }
 
 export interface Microvm {
@@ -38,18 +41,21 @@ export interface Microvm {
 }
 
 export interface FirecrackerMicrovmOptions {
-  binary: string;
-  firecracker: string;
-  pasta?: string;
+  backend: ContainerBackend;
+  runnerImage: string;
+  firecrackerPath?: string;
+  bootTimeoutMs?: number;
   logger?: { info(event: string, extra?: Record<string, unknown>): void };
 }
+
+const DEFAULT_BOOT_TIMEOUT_MS = 180_000;
+const DEFAULT_FIRECRACKER = "/usr/local/bin/firecracker";
 
 interface WireSpec {
   name: string;
   image_dir: string;
   work_dir: string;
   firecracker: string;
-  pasta?: string;
   user_data_file: string;
   vcpu?: number;
   mem_mib?: number;
@@ -66,13 +72,12 @@ interface WireSpec {
   };
 }
 
-function toWire(spec: MicrovmSpec, firecracker: string, pasta?: string): WireSpec {
+function toWire(spec: MicrovmSpec, firecracker: string): WireSpec {
   return {
     name: spec.name,
     image_dir: spec.imageDir,
     work_dir: spec.workDir,
     firecracker,
-    pasta,
     user_data_file: spec.userDataFile,
     vcpu: spec.vcpu,
     mem_mib: spec.memMib,
@@ -90,32 +95,23 @@ function toWire(spec: MicrovmSpec, firecracker: string, pasta?: string): WireSpe
   };
 }
 
-function parseResult(lines: string[], binary: string, code: number, stderr: string): MicrovmResult {
-  const json = [...lines].reverse().find((line) => line.trimStart().startsWith("{"));
-  if (json === undefined) {
-    throw new Error(
-      `${binary} -spec exited ${code} without a JSON result on any line of its output. The guest's ` +
-        `own console goes to a file next to it rather than here, so this is the launcher refusing ` +
-        `or dying before a guest existed: ${stderr.trim()}`,
-    );
-  }
+function parseResult(raw: string, container: string, source: string): MicrovmResult {
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(json) as Record<string, unknown>;
+    parsed = JSON.parse(raw) as Record<string, unknown>;
   } catch (cause) {
-    throw new Error(`${binary} -spec printed a line that is not JSON: ${json}`, { cause });
+    throw new Error(`${source} is not the JSON a guest's result is: ${raw.slice(0, 400)}`, { cause });
   }
   for (const field of ["name", "guest_ip", "socket", "console", "work_dir"]) {
     if (typeof parsed[field] !== "string" || parsed[field] === "") {
-      throw new Error(`${binary} -spec printed a result with no ${field}: ${json}`);
+      throw new Error(`${source} carries no ${field}: ${raw.slice(0, 400)}`);
     }
   }
   for (const field of ["vmm_pid", "pasta_pid"]) {
     if (typeof parsed[field] !== "number" || parsed[field] <= 0) {
       throw new Error(
-        `${binary} -spec printed ${field} as ${String(parsed[field])}, and a pid that is not a ` +
-          `positive number names no process: the guest behind it could never be stopped or ` +
-          `inspected. Result: ${json}`,
+        `${source} gives ${field} as ${String(parsed[field])}, and a pid that is not a positive ` +
+          `number names no process, so the guest behind it could never be stopped or inspected`,
       );
     }
   }
@@ -128,25 +124,30 @@ function parseResult(lines: string[], binary: string, code: number, stderr: stri
     socket: parsed.socket as string,
     console: parsed.console as string,
     workDir: parsed.work_dir as string,
+    container,
   };
 }
 
 export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Microvm {
-  if (!opts.binary) {
+  if (!opts.runnerImage) {
     throw new Error(
-      "createFirecrackerMicrovm needs the path of the socialweb-nodeboot binary. There is no " +
-        "default: the guest is booted from an image on this host by a VMM on this host, and a " +
-        "guessed path is a boot that does nothing.",
+      "createFirecrackerMicrovm needs the image the guest is booted in. The guest is a firecracker " +
+        "microVM, and booting one needs /dev/kvm, /dev/net/tun and the network capabilities that " +
+        "pasta's tap setup uses. This process does not run with those, and must not: it runs where " +
+        "the bidder runs. The container is given them instead, one per guest, exactly as the QEMU " +
+        "provider and the local provider already do.",
     );
   }
-  if (!opts.firecracker) {
-    throw new Error(
-      "createFirecrackerMicrovm needs the path of the firecracker binary. It is not on PATH on " +
-        "every host that builds the image -- on the reference host it lives under the image " +
-        "directory's artifacts -- so it is configuration rather than a lookup.",
-    );
+  const backend = opts.backend;
+  const runnerImage = opts.runnerImage;
+  const bootTimeoutMs = opts.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
+  const firecracker = opts.firecrackerPath ?? DEFAULT_FIRECRACKER;
+
+  async function containerLogs(name: string, tail = 60): Promise<string> {
+    const out = await backend.command(["logs", "--tail", String(tail), name]).catch(() => null);
+    if (out === null) return "(logs unavailable)";
+    return `${out.stdout}\n${out.stderr}`.trim().slice(-4000);
   }
-  const binary = opts.binary;
 
   return {
     name: "firecracker",
@@ -158,38 +159,93 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
             `itself and the frames it sends are answered by the interface it sent them from.`,
         );
       }
+      const container = spec.name;
       const specPath = `${spec.workDir}/boot-spec.json`;
+      const resultPath = `${spec.workDir}/result.json`;
       await Deno.mkdir(spec.workDir, { recursive: true });
-      await Deno.writeTextFile(specPath, JSON.stringify(toWire(spec, opts.firecracker, opts.pasta), null, 2));
-      const command = new Deno.Command(binary, {
-        args: ["-spec", specPath],
-        stdout: "piped",
-        stderr: "piped",
-      });
-      const { code, stdout, stderr } = await command.output();
-      const lines = new TextDecoder().decode(stdout).split("\n").filter((l) => l.trim() !== "");
-      const parsed = parseResult(lines, binary, code, new TextDecoder().decode(stderr));
-      opts.logger?.info("microvm_booted", {
-        name: parsed.name,
-        vmmPid: parsed.vmmPid,
-        pastaPid: parsed.pastaPid,
-        guestIp: parsed.guestIp,
-        fingerprint: parsed.fingerprint,
-      });
-      return parsed;
-    },
-    async stop(workDir: string): Promise<void> {
-      const command = new Deno.Command(binary, {
-        args: ["-stop", "-work-dir", workDir],
-        stdout: "piped",
-        stderr: "piped",
-      });
-      const { code, stderr } = await command.output();
-      if (code !== 0) {
+      await Deno.writeTextFile(specPath, JSON.stringify(toWire(spec, firecracker), null, 2));
+      await Deno.remove(resultPath).catch(() => {});
+
+      // The image directory and the work directory are mounted at the paths they
+      // already have, so the spec means the same thing inside the container as
+      // out of it: a guest's socket and console are named in the result, and the
+      // caller reads them from this side.
+      const runArgs = [
+        "run", "-d",
+        "--name", container,
+        "--device", "/dev/kvm",
+        "--device", "/dev/net/tun",
+        "--cap-add", "NET_ADMIN",
+        "--security-opt", "seccomp=unconfined",
+        "-v", `${spec.imageDir}:${spec.imageDir}:ro`,
+        "-v", `${spec.workDir}:${spec.workDir}`,
+        runnerImage,
+        // The runner image's entrypoint is what execs the launcher, as the
+        // unprivileged user it has to run as; naming it again here would arrive
+        // as a positional argument and stop the launcher's own flag parsing.
+        "-spec", specPath, "-result", resultPath, "-foreground",
+      ];
+      const started = await backend.command(runArgs);
+      if (started.code !== 0) {
         throw new Error(
-          `${binary} -stop -work-dir ${workDir} exited ${code}: ${new TextDecoder().decode(stderr).trim()}`,
+          `starting the container that boots guest ${spec.name} failed: ${started.stderr.trim()} ` +
+            `-- the guest is only ever a process inside a container, because booting one needs ` +
+            `/dev/kvm, /dev/net/tun and the capabilities pasta's tap setup uses, and the bidder ` +
+            `does not run with those`,
         );
       }
+
+      const deadline = Date.now() + bootTimeoutMs;
+      while (Date.now() < deadline) {
+        try {
+          const raw = await Deno.readTextFile(resultPath);
+          const result = parseResult(raw, container, resultPath);
+          opts.logger?.info("microvm_booted", {
+            name: result.name,
+            container,
+            guestIp: result.guestIp,
+            fingerprint: result.fingerprint,
+          });
+          return result;
+        } catch (err) {
+          if (!(err instanceof Deno.errors.NotFound)) throw err;
+        }
+        const running = await backend.command(["inspect", "-f", "{{.State.Running}}", container]);
+        if (running.code === 0 && running.stdout.trim() === "false") {
+          throw new Error(
+            `the container that boots guest ${spec.name} exited before it reported a guest, so no ` +
+              `guest exists. Its output:\n${await containerLogs(container)}`,
+          );
+        }
+        if (running.code !== 0) {
+          throw new Error(
+            `guest ${spec.name} has no container named ${container} and no result at ${resultPath}, ` +
+              `so it neither booted nor reported why: ${running.stderr.trim()}`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      throw new Error(
+        `guest ${spec.name} had not reported a result ${bootTimeoutMs}ms after its container ` +
+          `started. Its output:\n${await containerLogs(container)}`,
+      );
+    },
+    async stop(workDir: string): Promise<void> {
+      let container = "";
+      try {
+        const raw = await Deno.readTextFile(`${workDir}/result.json`);
+        container = (JSON.parse(raw) as { name?: string }).name ?? "";
+      } catch {
+        container = "";
+      }
+      if (!container) {
+        container = workDir.split("/").filter((p) => p !== "").pop() ?? "";
+      }
+      if (!container) {
+        throw new Error(`cannot tell which container holds the guest whose work directory is ${workDir}`);
+      }
+      await backend.kill(container).catch(() => {});
+      await backend.rm(container).catch(() => {});
     },
   };
 }

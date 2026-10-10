@@ -1472,6 +1472,11 @@
           "npm:hono@4"
         ]
       },
+      "lib/microvm-firecracker": {
+        "dependencies": [
+          "jsr:@publicdomainrelay/container-backend-abc@0"
+        ]
+      },
       "lib/node-image-firecracker": {
         "dependencies": [
           "jsr:@publicdomainrelay/node-image-abc@0"
