@@ -2,6 +2,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   onNetworkTargets,
   onNetworkUrlFromBundle,
+  withOnNetworkBaseUrl,
   withOnNetworkReporter,
 } from "@publicdomainrelay/compute-provider-firecracker";
 
@@ -107,4 +108,23 @@ Deno.test("the composed report script is a script bash accepts", async () => {
   } finally {
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test("the guest is told where to report, without an OIDC exchange having to succeed", () => {
+  // The reporter the enricher composes reads its URL out of base_url, and the
+  // only writer of that file is the provisioning-token script, which writes it
+  // only when its token exchange succeeds. A provider with no issuer therefore
+  // leaves the guest falling back to the public dispatcher, whose /v1/on-network
+  // is a 404 - the service fails and the requester waits out its timeout.
+  const url = "https://did-key-abc.xrpc.fedproxy.com/v1/on-network";
+  const composed = withOnNetworkBaseUrl(guestUserData(url), "https://issuer.example");
+  assertStringIncludes(composed, "/root/secrets/digitalocean.com/serviceaccount/base_url");
+  // The script appends /v1/on-network, so the file holds the origin and no path.
+  assertStringIncludes(composed, "https://did-key-abc.xrpc.fedproxy.com");
+  assertEquals(composed.includes("https://did-key-abc.xrpc.fedproxy.com/v1/on-network\n"), false);
+});
+
+Deno.test("a guest that already names base_url is left alone", () => {
+  const already = `${guestUserData()}\n  - path: /root/secrets/digitalocean.com/serviceaccount/base_url\n    content: "https://mine.example\n"\n`;
+  assertEquals(withOnNetworkBaseUrl(already, "https://issuer.example"), already);
 });

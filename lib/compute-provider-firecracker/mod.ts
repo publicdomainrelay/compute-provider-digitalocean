@@ -293,6 +293,33 @@ export function onNetworkReporterModule(
  * carries a guest-onnetwork unit (an `oidcProvisioner` composed one) is left
  * alone: two reporters would race to publish the same event.
  */
+/**
+ * What the guest's on-network reporter reads to learn where to post.
+ *
+ * The reporter the OIDC enricher composes gets its URL from
+ * /root/secrets/digitalocean.com/serviceaccount/base_url, and the only writer of
+ * that file is the provisioning-token script, which writes it only when its token
+ * exchange succeeds. A provider with no issuer therefore leaves the guest with no
+ * base_url, the reporter falls back to the public dispatcher, and its POST answers
+ * 404 - the service fails and the requester never learns the guest's tunnel
+ * address. This provider already knows the URL, so it writes it.
+ */
+export function withOnNetworkBaseUrl(
+  userData: string,
+  fallbackUrl: string,
+): string {
+  const path = "/root/secrets/digitalocean.com/serviceaccount/base_url";
+  if (userData.includes(path)) return userData;
+  const origin = new URL(onNetworkUrlFromBundle(userData, fallbackUrl)).origin;
+  return buildUserData({
+    base: userData,
+    modules: [() => ({
+      write_files: [{ path, owner: "root:root", permissions: "0600", content: `${origin}\n` }],
+      runcmdPrepend: [["sh", "-c", `install -d -m 0700 -o root -g root ${path.split("/").slice(0, -1).join("/")}`]],
+    })],
+  });
+}
+
 export function withOnNetworkReporter(
   userData: string,
   fallbackUrl: string,
@@ -597,7 +624,10 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     const enriched = ctx.oidcProvisioner
       ? await ctx.oidcProvisioner.enrich(vm.user_data, atproto.getAgentDid().split(":").slice(-1)[0], ctx.getIssuerUrl())
       : { userData: vm.user_data, nonce: "", associateWithDroplet: (_id: string) => {} };
-    const reported = withOnNetworkReporter(enriched.userData, ctx.getIssuerUrl(), acceptPathVm);
+    const reported = withOnNetworkBaseUrl(
+      withOnNetworkReporter(enriched.userData, ctx.getIssuerUrl(), acceptPathVm),
+      ctx.getIssuerUrl(),
+    );
     await jsrRegistryReady;
     const withJsr = injectJsrUrl(
       reported,
