@@ -1424,6 +1424,20 @@
           "npm:yaml@^2.7.0"
         ]
       },
+      "lib/compute-provider-firecracker": {
+        "dependencies": [
+          "jsr:@hono/hono@4",
+          "jsr:@publicdomainrelay/atproto-helpers@0",
+          "jsr:@publicdomainrelay/cloud-init-common@0",
+          "jsr:@publicdomainrelay/compute-provider-abc@0",
+          "jsr:@publicdomainrelay/microvm-firecracker@0",
+          "jsr:@publicdomainrelay/node-image-abc@0",
+          "jsr:@publicdomainrelay/oidc-issuer-abc@0",
+          "jsr:@publicdomainrelay/oidc-issuer-hono@0",
+          "jsr:@publicdomainrelay/secrets-common@0",
+          "npm:yaml@^2.7.0"
+        ]
+      },
       "lib/compute-provider-local": {
         "dependencies": [
           "jsr:@publicdomainrelay/atproto-helpers@0",
@@ -1456,6 +1470,11 @@
         "dependencies": [
           "jsr:@publicdomainrelay/compute-provider-abc@0",
           "npm:hono@4"
+        ]
+      },
+      "lib/node-image-firecracker": {
+        "dependencies": [
+          "jsr:@publicdomainrelay/node-image-abc@0"
         ]
       },
       "lib/oidc-issuer-hono": {

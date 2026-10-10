@@ -16,7 +16,11 @@
     "./lib/hono-factory-compute-provider-digitalocean",
     "./lib/qemu-standalone",
     "./hono-compute-provider",
-    "./hono-qemu-standalone"
+    "./hono-qemu-standalone",
+    "./lib/abc/node-image",
+    "./lib/node-image-firecracker",
+    "./lib/microvm-firecracker",
+    "./lib/compute-provider-firecracker"
   ],
   "imports": {
     "@publicdomainrelay/container-backend-common": "./lib/common/container-backend/mod.ts",
@@ -43,7 +47,11 @@
     "@publicdomainrelay/hono-factory-did-key-ingress-proxy-xrpc": "../did-key-ingress-proxy/lib/hono-factory-did-key-ingress-proxy-xrpc/mod.ts",
     "@publicdomainrelay/package-store-abc": "../hono-jsr/lib/abc/package-store/mod.ts",
     "@publicdomainrelay/package-store-local-fs": "../hono-jsr/lib/package-store-local-fs/mod.ts",
-    "@publicdomainrelay/hono-factory-package-registry": "../hono-jsr/lib/hono-factory-package-registry/mod.ts"
+    "@publicdomainrelay/hono-factory-package-registry": "../hono-jsr/lib/hono-factory-package-registry/mod.ts",
+    "@publicdomainrelay/node-image-abc": "./lib/abc/node-image/mod.ts",
+    "@publicdomainrelay/node-image-firecracker": "./lib/node-image-firecracker/mod.ts",
+    "@publicdomainrelay/microvm-firecracker": "./lib/microvm-firecracker/mod.ts",
+    "@publicdomainrelay/compute-provider-firecracker": "./lib/compute-provider-firecracker/mod.ts"
   },
   "tasks": {
     "test": "deno test -A test/cli_smoke_test.ts test/oidc_workload_identity_integration_test.ts test/oidc_rbac_integration_test.ts test/oidc_rbac_container_integration_test.ts",

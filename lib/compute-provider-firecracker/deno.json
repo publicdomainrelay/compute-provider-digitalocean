@@ -1,0 +1,18 @@
+{
+  "name": "@publicdomainrelay/compute-provider-firecracker",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/compute-provider-abc": "jsr:@publicdomainrelay/compute-provider-abc@^0",
+    "@publicdomainrelay/node-image-abc": "jsr:@publicdomainrelay/node-image-abc@^0",
+    "@publicdomainrelay/microvm-firecracker": "jsr:@publicdomainrelay/microvm-firecracker@^0",
+    "@publicdomainrelay/cloud-init-common": "jsr:@publicdomainrelay/cloud-init-common@^0",
+    "@publicdomainrelay/oidc-issuer-abc": "jsr:@publicdomainrelay/oidc-issuer-abc@^0",
+    "@publicdomainrelay/oidc-issuer-hono": "jsr:@publicdomainrelay/oidc-issuer-hono@^0",
+    "@publicdomainrelay/atproto-helpers": "jsr:@publicdomainrelay/atproto-helpers@^0",
+    "@publicdomainrelay/secrets-common": "jsr:@publicdomainrelay/secrets-common@^0",
+    "@hono/hono": "jsr:@hono/hono@^4",
+    "yaml": "npm:yaml@^2.7.0"
+  }
+}

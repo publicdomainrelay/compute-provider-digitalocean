@@ -1,0 +1,9 @@
+{
+  "name": "@publicdomainrelay/node-image-firecracker",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/node-image-abc": "jsr:@publicdomainrelay/node-image-abc@^0"
+  }
+}
