@@ -19,6 +19,7 @@ export interface MicrovmSpec {
   vcpu?: number;
   memMib?: number;
   instanceTimeoutSec?: number;
+  pastaArgs?: string[];
   network: MicrovmNetwork;
 }
 
@@ -60,6 +61,7 @@ interface WireSpec {
   vcpu?: number;
   mem_mib?: number;
   instance_timeout_sec?: number;
+  pasta_args?: string[];
   network: {
     guest_ip: string;
     prefix: number;
@@ -82,6 +84,7 @@ function toWire(spec: MicrovmSpec, firecracker: string): WireSpec {
     vcpu: spec.vcpu,
     mem_mib: spec.memMib,
     instance_timeout_sec: spec.instanceTimeoutSec,
+    pasta_args: spec.pastaArgs,
     network: {
       guest_ip: spec.network.guestIp,
       prefix: spec.network.prefix,

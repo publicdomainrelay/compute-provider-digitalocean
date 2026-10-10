@@ -86,6 +86,8 @@ const PREFIX_BITS = 30;
 
 const DEFAULT_RANGE_BASE = "172.30.0.0";
 
+const GUEST_SSH_PORT = 22;
+
 function octets(address: string): [number, number, number, number] {
   const parts = address.split(".").map((p) => Number(p));
   if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
@@ -253,6 +255,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
         userDataFile,
         vcpu: typeof vm.cpus === "number" && vm.cpus > 0 ? vm.cpus : undefined,
         memMib: parseMemMiB(vm.mem),
+        pastaArgs: ["-t", String(GUEST_SSH_PORT)],
         network,
       });
     } catch (cause) {

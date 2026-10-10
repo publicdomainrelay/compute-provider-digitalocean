@@ -12,6 +12,7 @@ RUN dnf install -y \
     e2fsprogs \
     iproute \
     util-linux \
+    openssh-clients \
  && dnf clean all \
  && useradd -u 1000 -m -s /bin/sh runner
 
