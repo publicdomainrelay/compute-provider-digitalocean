@@ -9,6 +9,7 @@ export interface NodeImageStatus {
   readonly kernel?: string;
   readonly initramfs?: string;
   readonly rootfs?: string;
+  readonly rootfsMiB?: number;
 }
 
 export interface EnsureOptions {

@@ -356,10 +356,12 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
   const rbacByProvider = new Map<string | number, StrongRef>();
   let nextIndex = 0;
   let imageDir: string | undefined;
+  let imageRootfsMiB: number | undefined;
 
   async function ensureImage(): Promise<string> {
     const status = await image.ensure({ reuseStale: ctx.reuseStale });
     imageDir = status.dir;
+    imageRootfsMiB = status.rootfsMiB;
     if (status.state === "reused") {
       logger.warn("node_image_reused", {
         askedFor: status.fingerprint,
@@ -370,6 +372,19 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     }
     logger.info("node_image_ready", { state: status.state, fingerprint: status.fingerprint, dir: status.dir });
     return status.dir;
+  }
+
+  function refuseADiskBiggerThanTheImage(name: string, disk: string): void {
+    const wanted = parseMemMiB(disk);
+    if (wanted === undefined || imageRootfsMiB === undefined || wanted <= imageRootfsMiB) return;
+    throw new Error(
+      `the RFP for ${name} asks for a ${disk} disk and nothing here resizes a guest's filesystem: ` +
+        `every guest boots a copy of the image's own rootfs template, which is ${imageRootfsMiB} MiB, ` +
+        `and the builder sizes that with rootfs_headroom_mib in the configuration this provider was ` +
+        `started with. Booting it anyway is a guest whose filesystem is smaller than the contract ` +
+        `says, and the contract is what the requester paid attention to: it fills up under its own ` +
+        `workload and fails to write, with the reason inside the guest rather than here.`,
+    );
   }
 
   async function createBidConfig(nowIso: string): Promise<StrongRef> {
@@ -414,11 +429,13 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     await Deno.writeTextFile(userDataFile, userData);
 
     logger.info("provisioning microvm", { name, guestIp: network.guestIp, cpus: vm.cpus, mem: vm.mem });
+    const dir = imageDir ?? (await ensureImage());
+    refuseADiskBiggerThanTheImage(name, vm.disk);
     let booted;
     try {
       booted = await microvm.boot({
         name,
-        imageDir: imageDir ?? (await ensureImage()),
+        imageDir: dir,
         workDir,
         userDataFile,
         vcpu: typeof vm.cpus === "number" && vm.cpus > 0 ? vm.cpus : undefined,

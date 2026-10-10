@@ -37,6 +37,16 @@ function parseStatus(lines: string[], binary: string, code: number, stderr: stri
       throw new Error(`${binary} -ensure -json printed an object with no ${field}: ${json}`);
     }
   }
+  const rootfsMiB = parsed.rootfsMiB;
+  if (typeof rootfsMiB !== "number" || !Number.isFinite(rootfsMiB) || rootfsMiB <= 0) {
+    throw new Error(
+      `${binary} -ensure -json printed ${JSON.stringify(parsed.rootfsMiB)} as the size of the ` +
+        `image's root filesystem, and a provider compares a contract's disk against that number. ` +
+        `Nothing resizes a guest's filesystem: a guest booted from a template smaller than its ` +
+        `contract asked for fills up and fails to write, with the reason inside the guest rather ` +
+        `than here. Object printed: ${json}`,
+    );
+  }
   const state = parsed.state as NodeImageState;
   if (!STATES.includes(state)) {
     throw new Error(
@@ -56,6 +66,7 @@ function parseStatus(lines: string[], binary: string, code: number, stderr: stri
     kernel: typeof parsed.kernel === "string" ? parsed.kernel : undefined,
     initramfs: typeof parsed.initramfs === "string" ? parsed.initramfs : undefined,
     rootfs: typeof parsed.rootfs === "string" ? parsed.rootfs : undefined,
+    rootfsMiB,
   };
 }
 
