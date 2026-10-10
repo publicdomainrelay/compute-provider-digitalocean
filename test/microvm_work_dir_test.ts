@@ -1,0 +1,75 @@
+import { assert, assertEquals } from "@std/assert";
+import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
+import { createFirecrackerMicrovm } from "@publicdomainrelay/microvm-firecracker";
+import type { MicrovmSpec } from "@publicdomainrelay/microvm-firecracker";
+
+const RUNNER_IMAGE = "localhost/socialweb-firecracker-runner:local";
+
+function backendThatBoots(spec: MicrovmSpec, written: string[]): ContainerBackend {
+  const result = {
+    name: spec.name,
+    fingerprint: "sha256-test",
+    vmm_pid: 4321,
+    pasta_pid: 4322,
+    guest_ip: spec.network.guestIp,
+    socket: `${spec.workDir}/firecracker.socket`,
+    console: `${spec.workDir}/console.log`,
+    work_dir: spec.workDir,
+  };
+  return {
+    type: "docker",
+    bin: "docker",
+    command: (args: string[]) => {
+      written.push(args[0]);
+      if (args[0] === "run") Deno.writeTextFileSync(`${spec.workDir}/result.json`, JSON.stringify(result));
+      return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+    },
+    inspectIp: () => Promise.resolve(spec.network.guestIp),
+    inspectGateway: () => Promise.resolve(spec.network.gateway),
+    defaultGateway: () => Promise.resolve(spec.network.gateway),
+    imageExists: () => Promise.resolve(true),
+    pullImage: () => Promise.resolve(),
+    rm: () => Promise.resolve(),
+    kill: () => Promise.resolve(),
+    exec: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    isRunning: () => Promise.resolve(true),
+    ensureRunning: () => Promise.resolve(true),
+    logStream: () => new ReadableStream<string>(),
+  };
+}
+
+function aSpec(workDir: string): MicrovmSpec {
+  return {
+    name: "fc-test-0001",
+    imageDir: workDir,
+    workDir,
+    userDataFile: `${workDir}/user-data.yaml`,
+    network: { guestIp: "172.30.0.2", prefix: 30, gateway: "172.30.0.1", pastaIp: "172.30.0.1" },
+  };
+}
+
+Deno.test("the work directory a guest is booted in is writable from inside its container", async () => {
+  const root = Deno.makeTempDirSync({ prefix: "microvm-workdir-" });
+  try {
+    const workDir = `${root}/guests/fc-test-0001`;
+    // The bidder creates this directory and the guest's launcher writes into it,
+    // as two different uids: whoever creates it decides the mode unless the boot
+    // step opens it, and a launcher that cannot write the copy of the rootfs
+    // boots no guest at all.
+    await Deno.mkdir(workDir, { recursive: true, mode: 0o755 });
+
+    const written: string[] = [];
+    const microvm = createFirecrackerMicrovm({
+      backend: backendThatBoots(aSpec(workDir), written),
+      runnerImage: RUNNER_IMAGE,
+    });
+    const result = await microvm.boot(aSpec(workDir));
+
+    assertEquals(result.guestIp, "172.30.0.2");
+    assert(written.includes("run"), "the guest boots in a container");
+    const mode = (await Deno.stat(workDir)).mode! & 0o777;
+    assertEquals(mode, 0o777, `the work directory is ${mode.toString(8)}, not 777`);
+  } finally {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
+});

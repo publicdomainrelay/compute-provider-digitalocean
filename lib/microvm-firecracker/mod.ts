@@ -172,6 +172,14 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
       const specPath = `${spec.workDir}/boot-spec.json`;
       const resultPath = `${spec.workDir}/result.json`;
       await Deno.mkdir(spec.workDir, { recursive: true });
+      // The work directory is written from both sides: the bidder writes the spec
+      // and reads the result, and the guest's launcher writes the copy of the
+      // rootfs, the seed and the result — as an unprivileged user of its own, since
+      // pasta started as root drops whoever starts the VMM to nobody. The two are
+      // different uids, and the directory is created by whichever runs first, so it
+      // is opened to both here rather than left at what one side's umask happened
+      // to make it.
+      await Deno.chmod(spec.workDir, 0o777);
       await Deno.writeTextFile(specPath, JSON.stringify(toWire(spec, firecracker), null, 2));
       await Deno.remove(resultPath).catch(() => {});
 
