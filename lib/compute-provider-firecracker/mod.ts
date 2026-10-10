@@ -1,6 +1,6 @@
 import { Hono } from "@hono/hono";
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import { acceptBundleModule, buildUserData, getUserDataModules } from "@publicdomainrelay/cloud-init-common";
+import { acceptBundleModule, buildUserData, getUserDataModules, injectJsrUrl } from "@publicdomainrelay/cloud-init-common";
 import type {
   CloudInitContext,
   UserDataModule,
@@ -22,6 +22,9 @@ import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-ab
 import { OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import { DEFAULT_ACCEPT_PATH_VM } from "@publicdomainrelay/secrets-common";
+import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
+import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
+import { createServe } from "@publicdomainrelay/serve";
 
 export const WIF_SIMPLE_NSID = "com.publicdomainrelay.temp.compute.config.wif.simple";
 
@@ -49,6 +52,7 @@ export interface ComputeProviderFirecrackerCtx extends ComputeProviderCtx {
   rangeBase?: string;
   reuseStale?: boolean;
   guestTlsPort?: number;
+  jsrBaseDir?: string;
   oidcProvisioner?: OidcProvisioningEnricher;
   acceptToContract?: Map<string, GuestContractEntry>;
   createSignedRepoRecord?: (
@@ -148,6 +152,157 @@ export function injectAcceptBundle(
   acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
 ): string {
   return buildUserData({ base: userData, modules: [acceptBundleModule(acceptPathVm, bundle)] });
+}
+
+/**
+ * The URL a guest reports its tunnel FQDN to, read out of the accept bundle the
+ * bidder injected. The bidder is the only party that knows its own relay URL,
+ * and it is the bidder's `/v1/on-network` that holds the accept-to-receipt map
+ * and submits the wrapped event to the requester. When the bundle carries none
+ * (an older bidder), this provider's own endpoint is used.
+ */
+export function onNetworkUrlFromBundle(userData: string, fallback: string): string {
+  const match = /"guest_onnetwork_url"\s*:\s*"([^"]+)"/.exec(userData);
+  return match ? match[1] : `${fallback.replace(/\/+$/, "")}/v1/on-network`;
+}
+
+export interface OnNetworkTarget {
+  url: string;
+  resolve?: string;
+}
+
+/**
+ * Where a guest can actually deliver its report. The first target is the URL as
+ * written. The second, when the guest's cloud-config names the host it reaches
+ * the relay dispatcher at (`<ip> relay.localhost`), pins that same address for
+ * the relay's own name: a guest's route to the host is the one pasta hands it,
+ * and the address in /etc/hosts for a relay name is the microVM's own gateway,
+ * which carries no arbitrary port.
+ */
+export function onNetworkTargets(userData: string, fallbackUrl: string): OnNetworkTarget[] {
+  const url = onNetworkUrlFromBundle(userData, fallbackUrl);
+  const targets: OnNetworkTarget[] = [{ url }];
+  const relayIp = /(\d+\.\d+\.\d+\.\d+)\s+relay\.localhost/.exec(userData)?.[1];
+  if (!relayIp) return targets;
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.endsWith(".localhost")) {
+      targets.push({ url, resolve: `${parsed.hostname}:${parsed.port || "80"}:${relayIp}` });
+    }
+  } catch {
+    /* the URL as written is the only target */
+  }
+  return targets;
+}
+
+/**
+ * guest-onnetwork -- report the dispatcher FQDN the tunnel subscriber wrote to
+ * /run/guest-fqdn back to the market, so the requester learns the one address it
+ * can open an SSH session to. Nothing else reports it: the guest is born from
+ * this user_data, and without this module the requester waits until its FQDN
+ * timeout while only the bidder-side onNetwork (the guest's raw, unroutable IP)
+ * is ever published.
+ *
+ * Composed into user_data, never baked into the image: curl and jq are already
+ * in the node image, and what the script says is a property of the contract
+ * (which accept, which endpoint), not of the disk.
+ */
+export function onNetworkReporterModule(
+  targets: OnNetworkTarget[],
+  acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
+): UserDataModule {
+  const attempts: string[] = [];
+  let index = 0;
+  for (const target of targets) {
+    index += 1;
+    const name = `CODE${index}`;
+    const resolve = target.resolve ? `--resolve "${target.resolve}" ` : "";
+    attempts.push(
+      `  ${name}="$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' ${resolve}\\`,
+      `    -X POST "${target.url}" -H 'Content-Type: application/json' -d "\${PAYLOAD}" \\`,
+      "    2>>/tmp/guest-onnetwork.err || echo 000)\"",
+      `  echo "guest-onnetwork: http \${${name}} ${target.url}"`,
+      `  if [ "\${${name}}" = "200" ]; then echo "guest-onnetwork: reported \${FQDN}"; exit 0; fi`,
+    );
+  }
+
+  const script = [
+    "#!/usr/bin/env bash",
+    "set -uo pipefail",
+    `ACCEPT_JSON="${acceptPathVm}"`,
+    'if [ ! -f "${ACCEPT_JSON}" ]; then echo "guest-onnetwork: no ${ACCEPT_JSON}"; exit 0; fi',
+    'FQDN=""',
+    "for _ in $(seq 1 90); do",
+    '  FQDN="$(cat /run/guest-fqdn 2>/dev/null || true)"',
+    '  [ -n "${FQDN}" ] && break',
+    "  sleep 2",
+    "done",
+    "if [ -z \"${FQDN}\" ]; then",
+    '  echo "guest-onnetwork: no /run/guest-fqdn after 180s"',
+    '  echo "guest-onnetwork: tunnel-subscriber is $(systemctl is-active tunnel-subscriber.service 2>&1), restarts=$(systemctl show -p NRestarts --value tunnel-subscriber.service 2>&1)"',
+    "  journalctl -u tunnel-subscriber.service --no-pager -n 40 2>&1 | tail -40",
+    "  exit 0",
+    "fi",
+    'ACCEPT_URI="$(jq -r \'.accept.uri // empty\' "${ACCEPT_JSON}")"',
+    'ACCEPT_CID="$(jq -r \'.accept.cid // empty\' "${ACCEPT_JSON}")"',
+    'if [ -z "${ACCEPT_URI}" ] || [ -z "${ACCEPT_CID}" ]; then echo "guest-onnetwork: accept.json has no accept ref"; exit 0; fi',
+    'PAYLOAD="$(jq -nc --arg au "${ACCEPT_URI}" --arg ac "${ACCEPT_CID}" --arg addr "${FQDN}" \\',
+    "  '{acceptUri: $au, acceptCid: $ac, address: $addr}')" + '"',
+    'echo "guest-onnetwork: reporting ${FQDN}"',
+    "for _ in 1 2 3 4 5; do",
+    ...attempts,
+    "  sleep 6",
+    "done",
+    'echo "guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)"',
+    "",
+  ].join("\n");
+
+  const unit = [
+    "[Unit]",
+    "Description=Report the guest tunnel FQDN to the market",
+    "After=network-online.target tunnel-subscriber.service",
+    "Wants=network-online.target tunnel-subscriber.service",
+    "",
+    "[Service]",
+    "Type=oneshot",
+    "RemainAfterExit=yes",
+    "ExecStart=/usr/local/bin/send-onnetwork.sh",
+    "StandardOutput=journal+console",
+    "StandardError=journal+console",
+    "",
+    "[Install]",
+    "WantedBy=multi-user.target",
+    "",
+  ].join("\n");
+
+  return () => ({
+    write_files: [
+      { path: "/usr/local/bin/send-onnetwork.sh", owner: "root:root", permissions: "0700", content: script },
+      { path: "/etc/systemd/system/guest-onnetwork.service", owner: "root:root", permissions: "0644", content: unit },
+    ],
+    runcmdPrepend: [
+      "systemctl daemon-reload",
+      "systemctl enable --no-block guest-onnetwork.service",
+      "systemctl start --no-block guest-onnetwork.service",
+    ],
+  });
+}
+
+/**
+ * Compose the FQDN reporter into a guest's user_data. A user_data that already
+ * carries a guest-onnetwork unit (an `oidcProvisioner` composed one) is left
+ * alone: two reporters would race to publish the same event.
+ */
+export function withOnNetworkReporter(
+  userData: string,
+  fallbackUrl: string,
+  acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
+): string {
+  if (userData.includes("guest-onnetwork.service")) return userData;
+  return buildUserData({
+    base: userData,
+    modules: [onNetworkReporterModule(onNetworkTargets(userData, fallbackUrl), acceptPathVm)],
+  });
 }
 
 export interface PreinstallFile {
@@ -358,6 +513,32 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
   let imageDir: string | undefined;
   let imageRootfsMiB: number | undefined;
 
+  // The packages these guests run (the tunnel subscriber above all) are
+  // workspace members that are not published to jsr.io, so a guest that fetches
+  // them from the public registry gets a 404 and its tunnel never comes up.
+  // Serve them from this host, exactly as the container provider does, and point
+  // the guest at it.
+  const jsrBaseDir = ctx.jsrBaseDir ?? new URL("../../..", import.meta.url).pathname;
+  let jsrPort = 0;
+  const jsrRegistryReady = (async () => {
+    const store = createLocalFsStore({ baseDir: jsrBaseDir, fallbackVersion: "0.0.0" });
+    const factory = createPackageRegistryFactory({ store });
+    const jsrServe = createServe({ logger, tcp: { addr: "0.0.0.0", port: 0 } });
+    jsrServe.app.route("/", factory as never);
+    await jsrServe.beginServe();
+    jsrPort = jsrServe.tcpPort;
+    logger.info("jsr registry mounted on TCP", { jsrBaseDir, port: jsrPort });
+  })();
+
+  /**
+   * The address a guest dials this host on. The relay name the requester put in
+   * the cloud-config is the host's own address as the guest sees it; a guest
+   * whose packets reach the gateway address instead can dial that.
+   */
+  function hostAddressForGuest(userData: string, gateway: string): string {
+    return /(\d+\.\d+\.\d+\.\d+)\s+relay\.localhost/.exec(userData)?.[1] ?? gateway;
+  }
+
   async function ensureImage(): Promise<string> {
     const status = await image.ensure({ reuseStale: ctx.reuseStale });
     imageDir = status.dir;
@@ -416,7 +597,13 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     const enriched = ctx.oidcProvisioner
       ? await ctx.oidcProvisioner.enrich(vm.user_data, atproto.getAgentDid().split(":").slice(-1)[0], ctx.getIssuerUrl())
       : { userData: vm.user_data, nonce: "", associateWithDroplet: (_id: string) => {} };
-    const userData = pointGuestAtHost(enriched.userData, network.gateway, ctx.guestTlsPort);
+    const reported = withOnNetworkReporter(enriched.userData, ctx.getIssuerUrl(), acceptPathVm);
+    await jsrRegistryReady;
+    const withJsr = injectJsrUrl(
+      reported,
+      `http://${hostAddressForGuest(reported, network.gateway)}:${jsrPort}`,
+    );
+    const userData = pointGuestAtHost(withJsr, network.gateway, ctx.guestTlsPort);
     await Deno.writeTextFile(userDataFile, userData);
 
     logger.info("provisioning microvm", { name, guestIp: network.guestIp, cpus: vm.cpus, mem: vm.mem });
