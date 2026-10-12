@@ -140,8 +140,15 @@ async function getPublicKeyFromSshd(
           stderr: "piped",
         });
       }
-      const { code, stdout } = await cmd.output();
+      const { code, stdout, stderr } = await cmd.output();
       const out = new TextDecoder().decode(stdout).trim();
+      if (code !== 0 || !out.includes("ed25519")) {
+        console.error(JSON.stringify({
+          level: "warn", message: "ssh-keyscan attempt", host: publicIpv4, port, code,
+          via: guestNetExec ? "guestNetExec" : containerName ? "container" : "direct",
+          stderr: new TextDecoder().decode(stderr).trim().slice(0, 300),
+        }));
+      }
 
       if (code === 0) {
         const line = out.split("\n").find((l) => l.includes("ed25519"));

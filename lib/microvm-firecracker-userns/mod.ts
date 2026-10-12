@@ -169,8 +169,13 @@ export function createUsernsFirecrackerMicrovm(opts: UsernsMicrovmOptions): Micr
   }
 
   async function childrenOf(pid: number): Promise<number[]> {
-    const raw = await Deno.readTextFile(`/proc/${pid}/task/${pid}/children`).catch(() => "");
-    return raw.trim().split(/\s+/).filter((p) => p !== "").map(Number);
+    const out: number[] = [];
+    const tasks = await Array.fromAsync(Deno.readDir(`/proc/${pid}/task`)).catch(() => []);
+    for (const t of tasks) {
+      const raw = await Deno.readTextFile(`/proc/${pid}/task/${t.name}/children`).catch(() => "");
+      out.push(...raw.trim().split(/\s+/).filter((p) => p !== "").map(Number));
+    }
+    return out;
   }
 
   async function descendantNamed(pid: number, comm: string): Promise<number | undefined> {
