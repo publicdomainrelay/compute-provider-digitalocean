@@ -1645,7 +1645,11 @@
         ]
       },
       "jsr:@publicdomainrelay/compute-deno-common@0.0.0": {},
-      "jsr:@publicdomainrelay/compute-request-abc@0.0.0": {},
+      "jsr:@publicdomainrelay/compute-request-abc@0.0.0": {
+        "dependencies": [
+          "jsr:@publicdomainrelay/market-common@0"
+        ]
+      },
       "jsr:@publicdomainrelay/compute-request-xrpc@0.0.0": {
         "dependencies": [
           "jsr:@publicdomainrelay/cloud-init-common@0",
@@ -1930,6 +1934,7 @@
       "jsr:@publicdomainrelay/market-bidder-abc@0.0.0": {},
       "jsr:@publicdomainrelay/market-bidder-agent@0.0.0": {},
       "jsr:@publicdomainrelay/market-bidder-compute@0.0.0": {},
+      "jsr:@publicdomainrelay/market-bidder-contract-store-fs@0.0.0": {},
       "jsr:@publicdomainrelay/market-bidder-keys@0.0.0": {},
       "jsr:@publicdomainrelay/market-bidder-worker@0.0.0": {},
       "jsr:@publicdomainrelay/market-bidder@0.0.0": {},

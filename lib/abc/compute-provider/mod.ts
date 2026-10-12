@@ -42,8 +42,13 @@ export interface GuestGone {
   exitCode?: number;
 }
 
+export type AdoptResult =
+  | { state: "running" }
+  | { state: "gone"; gone: GuestGone };
+
 export interface ComputeProvider {
   readonly name: string;
+  adopt?(id: string | number): Promise<AdoptResult>;
   provision(
     vm: VM,
     requesterDid: string,

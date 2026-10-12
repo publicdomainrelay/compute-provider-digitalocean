@@ -44,11 +44,18 @@ export interface MicrovmExit {
   logs: string;
 }
 
+export interface MicrovmContainerState {
+  exists: boolean;
+  running: boolean;
+  exitCode?: number;
+}
+
 export interface Microvm {
   readonly name: string;
   boot(spec: MicrovmSpec): Promise<MicrovmResult>;
   stop(workDir: string): Promise<void>;
   watch(container: string, onExit: (exit: MicrovmExit) => void): () => void;
+  inspect?(container: string): Promise<MicrovmContainerState>;
 
   /**
    * The address a guest of this microvm reaches THIS HOST at.
@@ -178,7 +185,7 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
   const watchIntervalMs = opts.watchIntervalMs ?? DEFAULT_WATCH_INTERVAL_MS;
   const firecracker = opts.firecrackerPath ?? DEFAULT_FIRECRACKER;
 
-  async function containerState(name: string): Promise<{ exists: boolean; running: boolean; exitCode?: number }> {
+  async function containerState(name: string): Promise<MicrovmContainerState> {
     const inspected = await backend.command(["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", name])
       .catch((err: unknown) => ({ code: -1, stdout: "", stderr: String(err) }));
     if (inspected.code !== 0) {
@@ -294,6 +301,7 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
           `started. Its output:\n${await containerLogs(container)}`,
       );
     },
+    inspect: containerState,
     hostAddressForGuest(): Promise<string> {
       // This module starts the guest's container without a --network flag, so it
       // lands on the runtime's default bridge and the host is that bridge's

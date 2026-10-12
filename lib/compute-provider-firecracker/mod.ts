@@ -8,6 +8,7 @@ import type {
   WriteFileEntry,
 } from "@publicdomainrelay/cloud-init-common";
 import type {
+  AdoptResult,
   ComputeAtproto,
   ComputeProvider,
   ComputeProviderCtx,
@@ -55,6 +56,7 @@ export interface ComputeProviderFirecrackerCtx extends ComputeProviderCtx {
   guestTlsPort?: number;
   jsrBaseDir?: string;
   oidcProvisioner?: OidcProvisioningEnricher;
+  hostBootId?: () => Promise<string>;
   acceptToContract?: Map<string, GuestContractEntry>;
   createSignedRepoRecord?: (
     collection: string,
@@ -114,6 +116,43 @@ const GUEST_SSH_PORT = 22;
 const GUEST_SSH_BIND = "0.0.0.0";
 
 const GUEST_NAME = /^fc-[0-9a-f]+-[0-9a-f]+$/;
+
+const GUEST_RECORD = "guest.json";
+
+const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
+
+interface GuestRecord {
+  version: 1;
+  guest: Guest;
+  index: number;
+  hostBootId: string;
+}
+
+export async function readHostBootId(): Promise<string> {
+  try {
+    return (await Deno.readTextFile(BOOT_ID_PATH)).trim();
+  } catch {
+    return "";
+  }
+}
+
+async function readGuestRecord(workDir: string): Promise<GuestRecord | undefined> {
+  let raw: string;
+  try {
+    raw = await Deno.readTextFile(`${workDir}/${GUEST_RECORD}`);
+  } catch {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(raw) as GuestRecord;
+    if (parsed?.version !== 1 || typeof parsed.guest?.name !== "string" || typeof parsed.index !== "number") {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
 
 function octets(address: string): [number, number, number, number] {
   const parts = address.split(".").map((p) => Number(p));
@@ -562,6 +601,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
   const { logger, atproto, image, microvm, workRoot } = ctx;
   const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
   const rangeBase = ctx.rangeBase ?? DEFAULT_RANGE_BASE;
+  const hostBootId = ctx.hostBootId ?? readHostBootId;
 
   const guests = new Map<string, Guest>();
   const rbacByProvider = new Map<string | number, StrongRef>();
@@ -645,9 +685,20 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     }
     const name = `fc-${shortId(requesterDid)}-${crypto.randomUUID().slice(0, 8)}`;
     const workDir = `${workRoot}/${name}`;
-    const network = networkFor(rangeBase, nextIndex++);
+    const index = nextIndex++;
+    const network = networkFor(rangeBase, index);
     const userDataFile = `${workDir}/user-data.yaml`;
     await Deno.mkdir(workDir, { recursive: true });
+    const guest: Guest = {
+      name,
+      workDir,
+      network,
+      userDataFile,
+      requesterPlc: requesterDid.split(":").pop() ?? "",
+      role: vm.role,
+    };
+    const record: GuestRecord = { version: 1, guest, index, hostBootId: await hostBootId() };
+    await Deno.writeTextFile(`${workDir}/${GUEST_RECORD}`, JSON.stringify(record, null, 2));
 
     const enriched = ctx.oidcProvisioner
       ? await ctx.oidcProvisioner.enrich(vm.user_data, atproto.getAgentDid().split(":").slice(-1)[0], ctx.getIssuerUrl())
@@ -693,23 +744,8 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
       throw cause;
     }
     enriched.associateWithDroplet(name);
-    const guest: Guest = {
-      name,
-      workDir,
-      network,
-      userDataFile,
-      requesterPlc: requesterDid.split(":").pop() ?? "",
-      role: vm.role,
-    };
     guests.set(name, guest);
-    watches.set(
-      name,
-      microvm.watch(booted.container, (exit) => {
-        guestExited(name, exit).catch((err: unknown) =>
-          logger.warn("microvm_exit_handling_failed", { name, error: String(err) })
-        );
-      }),
-    );
+    watchGuest(name, booted.container);
 
     let rbacRef: StrongRef | undefined;
     if (ctx.rbacProvisioner) {
@@ -758,11 +794,62 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     return guests.get(name)?.workDir ?? (GUEST_NAME.test(name) ? `${workRoot}/${name}` : undefined);
   }
 
+  function watchGuest(name: string, container: string): void {
+    watches.set(
+      name,
+      microvm.watch(container, (exit) => {
+        guestExited(name, exit).catch((err: unknown) =>
+          logger.warn("microvm_exit_handling_failed", { name, error: String(err) })
+        );
+      }),
+    );
+  }
+
+  async function adopt(id: string | number): Promise<AdoptResult> {
+    const name = String(id);
+    const workDir = workDirOf(name);
+    if (!workDir) {
+      logger.warn("microvm_adopt_unknown", { name });
+      return { state: "gone", gone: { id, reason: "vmm_exited" } };
+    }
+    if (watches.has(name)) return { state: "running" };
+    const record = await readGuestRecord(workDir);
+    const state = microvm.inspect ? await microvm.inspect(name) : { exists: true, running: true };
+    if (state.running) {
+      if (record) {
+        guests.set(name, { ...record.guest, workDir });
+        nextIndex = Math.max(nextIndex, record.index + 1);
+      }
+      watchGuest(name, name);
+      logger.info("microvm_adopted", { name, workDir, guestIp: record?.guest.network.guestIp });
+      return { state: "running" };
+    }
+    const bootNow = await hostBootId();
+    const reason = record?.hostBootId && bootNow && record.hostBootId !== bootNow ? "host_reboot" : "vmm_exited";
+    guests.delete(name);
+    await releaseRbac(name);
+    await microvm.stop(workDir).catch((err: unknown) =>
+      logger.warn("microvm_stop_failed", { name, error: String(err) })
+    );
+    logger.warn("microvm_gone_at_adopt", {
+      name,
+      reason,
+      containerExists: state.exists,
+      exitCode: state.exitCode,
+      bootIdThen: record?.hostBootId,
+      bootIdNow: bootNow,
+    });
+    const gone: GuestGone = state.exitCode === undefined
+      ? { id: name, reason }
+      : { id: name, reason, exitCode: state.exitCode };
+    return { state: "gone", gone };
+  }
+
   async function guestExited(name: string, exit: MicrovmExit): Promise<void> {
     watches.delete(name);
-    const guest = guests.get(name);
-    if (!guest) return;
+    const workDir = guests.get(name)?.workDir ?? workDirOf(name);
     guests.delete(name);
+    if (!workDir) return;
     logger.warn("microvm_exited", {
       name,
       reason: exit.reason,
@@ -770,7 +857,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
       logs: exit.logs.slice(-2000),
     });
     await releaseRbac(name);
-    await microvm.stop(guest.workDir).catch((err: unknown) =>
+    await microvm.stop(workDir).catch((err: unknown) =>
       logger.warn("microvm_stop_failed", { name, error: String(err) })
     );
     const gone: GuestGone = { id: name, reason: `runner container ${exit.reason}`, exitCode: exit.exitCode };
@@ -862,7 +949,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     logger.info("firecracker guest event routes mounted", {});
   }
 
-  return { ensureImage, createBidConfig, provision, destroy, onConnected, onGuestGone, guests };
+  return { ensureImage, createBidConfig, provision, destroy, adopt, onConnected, onGuestGone, guests };
 }
 
 export function parseMemMiB(mem: unknown): number | undefined {
@@ -932,6 +1019,7 @@ export function createFirecrackerComputeProvider(ctx: ComputeProviderFirecracker
       return result;
     },
     destroy: inner.destroy,
+    adopt: inner.adopt,
     onGuestGone: inner.onGuestGone,
     createBidConfig: inner.createBidConfig,
     injectAcceptBundle: (userData: string, bundle: Record<string, unknown>) =>
