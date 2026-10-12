@@ -116,11 +116,10 @@ Deno.test("a guest is told to reach the host at the container's gateway, not pas
       runnerImage: RUNNER_IMAGE,
     });
 
-    // A guest's loopback is its own, so this address is where its registry fetch
-    // and its token exchange have to land to arrive at the host at all. Naming
-    // pasta's gateway instead points them at the container, whose loopback has
-    // neither, and the guest comes up with a tunnel subscriber that can never
-    // fetch itself and so never registers a tunnel.
+    // A guest's loopback is its own, so this address is where its token
+    // exchange and its on-network report have to land to arrive at the host at
+    // all. Naming pasta's gateway instead points them at the container, whose
+    // loopback has neither, and the guest never reports its iroh ticket.
     assertEquals(await microvm.hostAddressForGuest(), CONTAINER_HOST);
     assert(
       (await microvm.hostAddressForGuest()) !== spec.network.gateway,

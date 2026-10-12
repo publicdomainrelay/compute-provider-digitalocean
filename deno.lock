@@ -1435,14 +1435,11 @@
           "jsr:@publicdomainrelay/atproto-helpers@0",
           "jsr:@publicdomainrelay/cloud-init-common@0",
           "jsr:@publicdomainrelay/compute-provider-abc@0",
-          "jsr:@publicdomainrelay/hono-factory-package-registry@0",
           "jsr:@publicdomainrelay/microvm-firecracker@0",
           "jsr:@publicdomainrelay/node-image-abc@0",
           "jsr:@publicdomainrelay/oidc-issuer-abc@0",
           "jsr:@publicdomainrelay/oidc-issuer-hono@0",
-          "jsr:@publicdomainrelay/package-store-local-fs@0",
           "jsr:@publicdomainrelay/secrets-common@0",
-          "jsr:@publicdomainrelay/serve@0",
           "npm:yaml@^2.7.0"
         ]
       },
@@ -1450,9 +1447,7 @@
         "dependencies": [
           "jsr:@publicdomainrelay/atproto-helpers@0",
           "jsr:@publicdomainrelay/compute-provider-abc@0",
-          "jsr:@publicdomainrelay/hono-factory-package-registry@0",
           "jsr:@publicdomainrelay/oidc-issuer-hono@0",
-          "jsr:@publicdomainrelay/package-store-local-fs@0",
           "jsr:@publicdomainrelay/qemu-standalone@0",
           "jsr:@publicdomainrelay/serve@0",
           "npm:yaml@^2.7.0"

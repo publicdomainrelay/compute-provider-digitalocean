@@ -14,10 +14,8 @@ import type {
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
-import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
 import { Hono } from "@hono/hono";
-import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
-import { createServe, type ServeHandle } from "@publicdomainrelay/serve";
+import type { ServeHandle } from "@publicdomainrelay/serve";
 
 // Direct import needed for internal QEMU VM provisioning path.
 // This is not an ABC violation: VM provisioning (QEMU + KVM) fundamentally
@@ -54,8 +52,6 @@ export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
    * https://*.localhost URLs without a port (e.g. the OIDC issuer, which is
    * HTTPS-only) are rewritten to this port in the cloud-init user_data. */
   guestTlsPort?: number;
-  /** Base directory for the ephemeral JSR package registry. Defaults to org root. */
-  jsrBaseDir?: string;
   /** When true, spawn a background task to tail container logs and emit
    * them as structured JSON log lines (level "info", message "container_log").
    * Useful for debugging guest boot issues in tests. */
@@ -603,35 +599,12 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
   const cacheDir = ctx.cacheDir ??
     Deno.env.get("CACHE_DIR") ??
     qemuCacheDir();
-  // Port of the dedicated JSR TCP+TLS serve (set during serve.onConnected).
-  let _jsrPort = 0;
-
   serve.onConnected(async (ingressRef) => {
     const serviceUrl = didWebToHttps(ingressRef);
     serve.app.route("/", oidcIssuer.app as never);
     logger.info("local oidc issuer mounted", { serviceUrl });
 
-    // Ephemeral JSR registry — serves workspace packages to guest containers.
-    // When TLS certs are provided, create a dedicated TCP+TLS serve so guest
-    // containers can reach it directly via gateway IP over HTTPS (Deno requires
-    // HTTPS for JSR_URL). Otherwise mount on relay serve (production path:
-    // TLS terminated at reverse proxy).
-    const jsrBaseDir = ctx.jsrBaseDir ??
-      new URL("../../..", import.meta.url).pathname;
-    const jsrStore = createLocalFsStore({ baseDir: jsrBaseDir, fallbackVersion: "0.0.0" });
-    const jsrFactory = createPackageRegistryFactory({ store: jsrStore, passthrough: false });
-    // Dedicated TCP serve for JSR — plain HTTP, reachable from guest
-    // containers via gateway IP. Deno accepts HTTP JSR_URL for downloads.
-    const jsrServe = createServe({
-      logger,
-      tcp: { addr: "0.0.0.0", port: 0 },
-    });
-    jsrServe.app.route("/", jsrFactory as never);
-    await jsrServe.beginServe();
-    _jsrPort = jsrServe.tcpPort;
-    logger.info("jsr registry mounted on TCP", { jsrBaseDir, port: _jsrPort });
-
-    // Guest onNetwork endpoint — VM calls back at boot with accept ref + FQDN.
+    // Guest onNetwork endpoint — VM calls back at boot with accept ref + iroh ticket.
     // Protected by OIDC Bearer token (same workload identity as /v1/oidc/issue).
     const eventsApp = new Hono();
     eventsApp.post("/v1/on-network", async (c) => {
@@ -751,19 +724,6 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       ? await oidcIssuer.provisioningEnricher.enrich(user_data, agentDidPlc)
       : { userData: user_data, nonce: "", associateWithDroplet: () => {} };
     let enrichedUserData = enriched.userData;
-    // ── JSR_URL injection ────────────────────────────────────────────────
-    // Dedicated JSR TCP serve runs regardless of hostname. Use the container
-    // gateway IP so the guest can reach the host over the VM bridge.
-    if (_jsrPort > 0) {
-      const gw = await backend.defaultGateway?.();
-      if (gw) {
-        const jsrUrl = `http://${gw}:${_jsrPort}/`;
-        enrichedUserData = enrichedUserData.replace(
-          /(ExecStart=\S*deno run .*tunnel-subscriber)/,
-          `Environment="JSR_URL=${jsrUrl}"\n      $1`,
-        );
-      }
-    }
 
     // ── localhost-specific container networking hacks ─────────────────────
     const issuerHost = (() => { try { return new URL(getIssuerUrl()).hostname; } catch { return ""; } })();
@@ -810,15 +770,6 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
                 content: ctx.caCertPem,
               });
               obj["write_files"] = writeFiles;
-              const tunnelUnit = writeFiles.find(
-                (f: unknown) => (f as Record<string, unknown>)?.path === "/etc/systemd/system/tunnel-subscriber.service"
-              ) as { content?: string } | undefined;
-              if (tunnelUnit?.content) {
-                tunnelUnit.content = tunnelUnit.content.replace(
-                  /^ExecStart=/m,
-                  "ExecStartPre=update-ca-certificates\nExecStart=",
-                );
-              }
             }
             enrichedUserData = "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
             logger.info("container networking: patched cloud-init for gateway", {

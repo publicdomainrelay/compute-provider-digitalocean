@@ -1,4 +1,4 @@
-import { acceptBundleModule, buildUserData, injectJsrUrl } from "@publicdomainrelay/cloud-init-common";
+import { acceptBundleModule, buildUserData } from "@publicdomainrelay/cloud-init-common";
 import { ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
 import type { StructuredLoggerInterface } from "@publicdomainrelay/logger";
 import type {
@@ -12,8 +12,6 @@ import type {
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
 import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
-import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
-import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
 import type { ServeHandle } from "@publicdomainrelay/serve";
 
 export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
@@ -40,7 +38,6 @@ export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
     url: string,
     body: Record<string, unknown>,
   ) => Promise<Response>;
-  jsrBaseDir?: string;
 }
 
 const COMPUTE_CONFIG_WIF_SIMPLE_NSID =
@@ -94,7 +91,6 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
   const droplets = new Map<string, LocalDroplet>();
 
   let doctxPromise: Promise<{ teamUuid: string }> | null = null;
-  let _serviceUrl = "";
 
   async function makeDoctx(): Promise<{ teamUuid: string }> {
     const res = await fetch(`${digitaloceanBaseUrl}/v2/account`, {
@@ -146,24 +142,10 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
 
   serve.onConnected((ingressRef) => {
     const serviceUrl = didWebToHttps(ingressRef);
-    _serviceUrl = serviceUrl;
     serve.app.route("/", oidcIssuer.app as never);
     logger.info("do oidc issuer mounted", { serviceUrl });
 
-    const jsrBaseDir = ctx.jsrBaseDir ??
-      new URL("../../..", import.meta.url).pathname;
-    const jsrStore = createLocalFsStore({
-      baseDir: jsrBaseDir,
-      fallbackVersion: "0.0.0",
-    });
-    const jsrFactory = createPackageRegistryFactory({
-      store: jsrStore,
-      passthrough: true,
-    });
-    serve.app.route("/", jsrFactory as never);
-    logger.info("ephemeral jsr registry mounted", { serviceUrl });
-
-    // Guest on-network endpoint — VM reports tunnel FQDN after boot.
+    // Guest on-network endpoint — VM reports its iroh ticket after boot.
     if (acceptToContract && createSignedRepoRecord) {
       const COMPUTE_EVENTS_VM_ON_NETWORK_NSID =
         "com.publicdomainrelay.temp.compute.events.vm.onNetwork";
@@ -283,10 +265,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
       ? await oidcIssuer.provisioningEnricher.enrich(user_data, doctx.teamUuid)
       : { userData: user_data, nonce: "", associateWithDroplet: (_id: string) => {} };
 
-    let enrichedUserData = enriched.userData;
-    if (_serviceUrl) {
-      enrichedUserData = injectJsrUrl(enrichedUserData, _serviceUrl);
-    }
+    const enrichedUserData = enriched.userData;
 
     const body = {
       name,

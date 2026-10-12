@@ -271,7 +271,7 @@ runcmd:
       // enricher itself, which is the half of the exchange that happens on this
       // side. There is no SSH poll here on purpose -- a firecracker guest behind
       // pasta dials out and is not reachable inbound, which is why the market
-      // path reaches its guests through a tunnel rather than by connecting to
+      // path reaches its guests over their own iroh endpoint rather than by connecting to
       // them. The callback below is an outbound connection and is the signal
       // that the guest came up and did the exchange.
       const workRoot = Deno.env.get("SOCIALWEB_FIRECRACKER_WORK_ROOT")!;

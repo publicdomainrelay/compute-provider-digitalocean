@@ -12,8 +12,8 @@ import {
 // into a dotted quad. That makes the MAC the only thing that decides the
 // guest's address, so these tests reimplement that script and hold the
 // provider to agreeing with it. A disagreement is a guest that comes up at an
-// address the host did not route to it, which reads as a tunnel that never
-// appears rather than as an addressing bug.
+// address the host did not route to it, which reads as a guest address that
+// never appears rather than as an addressing bug.
 
 function fcnetAddressFromMac(mac: string): string {
   const m = /(?<=06:00:)([0-9a-f]{2}:?){4}/.exec(mac);

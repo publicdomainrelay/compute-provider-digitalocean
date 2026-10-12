@@ -1,6 +1,6 @@
 import { Hono } from "@hono/hono";
 import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import { acceptBundleModule, buildUserData, getUserDataModules, injectJsrUrl } from "@publicdomainrelay/cloud-init-common";
+import { acceptBundleModule, buildUserData, getUserDataModules } from "@publicdomainrelay/cloud-init-common";
 import type {
   CloudInitContext,
   UserDataModule,
@@ -23,9 +23,6 @@ import type { Microvm, MicrovmExit } from "@publicdomainrelay/microvm-firecracke
 import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import { DEFAULT_ACCEPT_PATH_VM } from "@publicdomainrelay/secrets-common";
-import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
-import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
-import { createServe } from "@publicdomainrelay/serve";
 
 export const WIF_SIMPLE_NSID = "com.publicdomainrelay.temp.compute.config.wif.simple";
 
@@ -53,7 +50,6 @@ export interface ComputeProviderFirecrackerCtx extends ComputeProviderCtx {
   rangeBase?: string;
   reuseStale?: boolean;
   guestTlsPort?: number;
-  jsrBaseDir?: string;
   oidcProvisioning?: boolean;
   oidcJwkStore?: JwkStore;
   oidcNonceStore?: NonceStore;
@@ -210,7 +206,7 @@ export function injectAcceptBundle(
 }
 
 /**
- * The URL a guest reports its tunnel FQDN to, read out of the accept bundle the
+ * The URL a guest reports its iroh ticket to, read out of the accept bundle the
  * bidder injected. The bidder is the only party that knows its own relay URL,
  * and it is the bidder's `/v1/on-network` that holds the accept-to-receipt map
  * and submits the wrapped event to the requester. When the bundle carries none
@@ -251,7 +247,7 @@ export function onNetworkTargets(userData: string, fallbackUrl: string): OnNetwo
 }
 
 /**
- * guest-onnetwork -- report the dispatcher FQDN the tunnel subscriber wrote to
+ * guest-onnetwork -- report the iroh ticket the iroh listener wrote to
  * /run/guest-fqdn back to the market, so the requester learns the one address it
  * can open an SSH session to. Nothing else reports it: the guest is born from
  * this user_data, and without this module the requester waits until its FQDN
@@ -294,8 +290,8 @@ export function onNetworkReporterModule(
     "done",
     "if [ -z \"${FQDN}\" ]; then",
     '  echo "guest-onnetwork: no /run/guest-fqdn after 180s"',
-    '  echo "guest-onnetwork: tunnel-subscriber is $(systemctl is-active tunnel-subscriber.service 2>&1), restarts=$(systemctl show -p NRestarts --value tunnel-subscriber.service 2>&1)"',
-    "  journalctl -u tunnel-subscriber.service --no-pager -n 40 2>&1 | tail -40",
+    '  echo "guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)"',
+    "  journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40",
     "  exit 0",
     "fi",
     'ACCEPT_URI="$(jq -r \'.accept.uri // empty\' "${ACCEPT_JSON}")"',
@@ -314,9 +310,9 @@ export function onNetworkReporterModule(
 
   const unit = [
     "[Unit]",
-    "Description=Report the guest tunnel FQDN to the market",
-    "After=network-online.target tunnel-subscriber.service",
-    "Wants=network-online.target tunnel-subscriber.service",
+    "Description=Report the guest iroh ticket to the market",
+    "After=network-online.target iroh.service",
+    "Wants=network-online.target iroh.service",
     "",
     "[Service]",
     "Type=oneshot",
@@ -356,8 +352,8 @@ export function onNetworkReporterModule(
  * that file is the provisioning-token script, which writes it only when its token
  * exchange succeeds. A provider with no issuer therefore leaves the guest with no
  * base_url, the reporter falls back to the public dispatcher, and its POST answers
- * 404 - the service fails and the requester never learns the guest's tunnel
- * address. This provider already knows the URL, so it writes it.
+ * 404 - the service fails and the requester never learns the guest's iroh
+ * ticket. This provider already knows the URL, so it writes it.
  */
 export function withOnNetworkBaseUrl(
   userData: string,
@@ -579,7 +575,7 @@ function pointGuestAtHost(userData: string, gateway: string, guestTlsPort?: numb
       "the cloud-init document this guest was given is not the YAML this reads, so the names it " +
         "resolves to the host cannot be added to it. A guest whose relay name resolves nowhere " +
         "installs its services and then cannot reach the thing that makes it reachable, and the " +
-        "failure reads as a tunnel that never appears rather than as a host that was never named.",
+        "failure reads as a guest address that never appears rather than as a host that was never named.",
     );
   }
   const runcmd = (obj["runcmd"] as unknown[]) ?? [];
@@ -634,23 +630,6 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
   let imageDir: string | undefined;
   let imageRootfsMiB: number | undefined;
 
-  // The packages these guests run (the tunnel subscriber above all) are
-  // workspace members that are not published to jsr.io, so a guest that fetches
-  // them from the public registry gets a 404 and its tunnel never comes up.
-  // Serve them from this host, exactly as the container provider does, and point
-  // the guest at it.
-  const jsrBaseDir = ctx.jsrBaseDir ?? new URL("../../..", import.meta.url).pathname;
-  let jsrPort = 0;
-  const jsrRegistryReady = (async () => {
-    const store = createLocalFsStore({ baseDir: jsrBaseDir, fallbackVersion: "0.0.0" });
-    const factory = createPackageRegistryFactory({ store });
-    const jsrServe = createServe({ logger, tcp: { addr: "0.0.0.0", port: 0 } });
-    jsrServe.app.route("/", factory as never);
-    await jsrServe.beginServe();
-    jsrPort = jsrServe.tcpPort;
-    logger.info("jsr registry mounted on TCP", { jsrBaseDir, port: jsrPort });
-  })();
-
   /**
    * The address a guest dials this host on. The relay name the requester put in
    * the cloud-config is the host's own address as the guest sees it; a guest
@@ -703,7 +682,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
       throw new Error(
         `an RFP for ${vm.role} arrived with no user_data. On this provider the user_data IS the ` +
           `guest: nothing else is baked into it at boot, so a guest started without one comes up ` +
-          `with no sshd, no tunnel and no secrets, and reaches Running while being unreachable.`,
+          `with no sshd, no iroh listener and no secrets, and reaches Running while being unreachable.`,
       );
     }
     const name = `fc-${shortId(requesterDid)}-${crypto.randomUUID().slice(0, 8)}`;
@@ -730,7 +709,6 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
       withOnNetworkReporter(enriched.userData, ctx.getIssuerUrl(), acceptPathVm),
       ctx.getIssuerUrl(),
     );
-    await jsrRegistryReady;
     // Every name the guest resolves to this host is written against one address.
     // A requester that already named one (the harness passes `guestHostAliases`)
     // is kept: its line is in the document the guest boots with, and cloud-init
@@ -739,9 +717,8 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     // host is at the container's own gateway, which is where a guest that leaves
     // through pasta actually arrives -- see Microvm.hostAddressForGuest.
     const hostAddress = addressTheRequesterNamed(reported) ?? await ctx.microvm.hostAddressForGuest();
-    const withJsr = injectJsrUrl(reported, `http://${hostAddress}:${jsrPort}`);
-    const userData = pointGuestAtHost(withJsr, hostAddress, ctx.guestTlsPort);
-    logger.info("guest_host_address", { name, hostAddress, jsrPort });
+    const userData = pointGuestAtHost(reported, hostAddress, ctx.guestTlsPort);
+    logger.info("guest_host_address", { name, hostAddress });
     await Deno.writeTextFile(userDataFile, userData);
 
     logger.info("provisioning microvm", { name, guestIp: network.guestIp, cpus: vm.cpus, mem: vm.mem });

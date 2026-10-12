@@ -61,8 +61,8 @@ export interface Microvm {
    * The address a guest of this microvm reaches THIS HOST at.
    *
    * A guest's loopback is its own, so the names it resolves to the host -- the
-   * package registry it fetches its tunnel subscriber from, the issuer it
-   * exchanges a provisioning token with -- have to be written against an
+   * issuer it exchanges a provisioning token with, the bidder it reports its
+   * iroh ticket to -- have to be written against an
    * address that leaves the guest. The guest's traffic leaves through pasta
    * into the container this module starts it in, and that container reaches
    * the host at its default gateway, so that is the address: pasta's own

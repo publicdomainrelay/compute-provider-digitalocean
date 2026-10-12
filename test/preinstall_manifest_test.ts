@@ -8,8 +8,6 @@ import {
 
 const CTX = {
   vmName: "test-vm",
-  ingressProxyHost: "relay.example:8443",
-  audHost: "relay.example",
   sshAuthorizedKey: "ssh-ed25519 AAAA the requester",
 };
 
@@ -45,7 +43,7 @@ registerUserDataModule("test-odd-prepend", () => ({
 }));
 
 Deno.test("a file is baked when the guest cannot tell which guest it is", () => {
-  const modules = ["tunnel", "secrets"];
+  const modules = ["iroh", "secrets"];
   const manifest = preinstallManifest({ modules, ctx: CTX });
 
   assert(
@@ -55,7 +53,7 @@ Deno.test("a file is baked when the guest cannot tell which guest it is", () => 
   );
   assert(
     manifest.packages.includes("openssh-server"),
-    `the tunnel module installs openssh-server at boot: ${JSON.stringify(manifest.packages)}`,
+    `the iroh module installs openssh-server at boot: ${JSON.stringify(manifest.packages)}`,
   );
 
   const under = (ctx: Partial<typeof CTX>) =>
@@ -94,10 +92,10 @@ Deno.test("a file is baked when the guest cannot tell which guest it is", () => 
 });
 
 Deno.test("the requester's key is left to boot rather than baked into every guest's image", () => {
-  const manifest = preinstallManifest({ modules: ["tunnel"], ctx: CTX });
+  const manifest = preinstallManifest({ modules: ["iroh"], ctx: CTX });
   assert(
     manifest.leftToBoot.files.includes("/root/.ssh/authorized_keys"),
-    `the tunnel module writes the requesting party's public key into /root/.ssh/authorized_keys, ` +
+    `the iroh module writes the requesting party's public key into /root/.ssh/authorized_keys, ` +
       `and the derivation baked it: the image is built once and booted by every guest, so that key ` +
       `would be one contract's key inside every later guest. Left to boot were: ` +
       `${JSON.stringify(manifest.leftToBoot.files)}`,

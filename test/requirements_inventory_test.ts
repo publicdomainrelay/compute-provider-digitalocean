@@ -8,8 +8,8 @@ const INVENTORIED_SOURCES = [
   "hono-compute-provider/lib/compute-provider-firecracker/mod.ts",
   "hono-compute-provider/lib/microvm-firecracker/mod.ts",
 ];
-const STATUS = /^(port|removed-legacy|superseded-by-(?:[0-9]{4}:)?[A-Z0-9]+(?:-[A-Z0-9]+)*)$/;
-const SOURCE = /^([A-Za-z0-9._/-]+):(\d+)(?:-(\d+))?$/;
+const STATUS = /^(port|removed-legacy|removed|superseded-by-(?:[0-9]{4}:)?[A-Z0-9]+(?:-[A-Z0-9]+)*)$/;
+const SOURCE = /^([A-Za-z0-9._/-]+)(?:@([0-9a-f]{7,40}))?:(\d+)(?:-(\d+))?$/;
 const GO_SIDE_MEETS = ["yes", "partial", "no", "not-applicable"];
 
 interface Requirement {
@@ -85,26 +85,63 @@ Deno.test("every requirement names its id, source, behaviour, Go side, parity te
   }
 });
 
+async function gitText(repo: string, args: string[]): Promise<string | undefined> {
+  const out = await new Deno.Command("git", {
+    args: ["-C", new URL(`${repo}/`, ORG_ROOT).pathname, ...args],
+    stdout: "piped",
+    stderr: "null",
+  }).output().catch(() => undefined);
+  return out?.success ? new TextDecoder().decode(out.stdout) : undefined;
+}
+
+async function linesAt(path: string, commit: string | undefined): Promise<number | string> {
+  if (!commit) {
+    try {
+      return (await Deno.readTextFile(new URL(path, ORG_ROOT))).split("\n").length;
+    } catch (err) {
+      return `${path} cannot be read: ${String(err)}`;
+    }
+  }
+  const [repo, ...rest] = path.split("/");
+  if (await gitText(repo, ["cat-file", "-e", `${commit}^{commit}`]) === undefined) return Infinity;
+  const text = await gitText(repo, ["show", `${commit}:${rest.join("/")}`]);
+  return text === undefined ? `${path} is not in ${repo} at ${commit}` : text.split("\n").length;
+}
+
 Deno.test("every source a requirement cites is a file and line that exist", async () => {
   const problems: string[] = [];
   for (const r of await inventory()) {
     for (const cited of r.source) {
       const m = SOURCE.exec(cited);
       if (!m) {
-        problems.push(`${r.id}: ${cited} is not path:line or path:start-end`);
+        problems.push(`${r.id}: ${cited} is not path:line, path:start-end or path@commit:start-end`);
         continue;
       }
-      const last = Number(m[3] ?? m[2]);
-      let lines: number;
-      try {
-        lines = (await Deno.readTextFile(new URL(m[1], ORG_ROOT))).split("\n").length;
-      } catch (err) {
-        problems.push(`${r.id}: ${m[1]} cannot be read: ${String(err)}`);
+      const [, path, commit, first, end] = m;
+      if (commit && r.status !== "removed") {
+        problems.push(`${r.id}: ${cited} pins a commit, which only a removed requirement may cite`);
         continue;
       }
-      if (Number(m[2]) < 1 || last < Number(m[2]) || last > lines) {
-        problems.push(`${r.id}: ${cited} is outside the ${lines} lines of ${m[1]}`);
+      const last = Number(end ?? first);
+      const lines = await linesAt(path, commit);
+      if (typeof lines === "string") {
+        problems.push(`${r.id}: ${lines}`);
+        continue;
       }
+      if (Number(first) < 1 || last < Number(first) || last > lines) {
+        problems.push(`${r.id}: ${cited} is outside the ${lines} lines of ${path}`);
+      }
+    }
+  }
+  assertEquals(problems, []);
+});
+
+Deno.test("a removed requirement cites the code as it was before the removal", async () => {
+  const problems: string[] = [];
+  for (const r of await inventory()) {
+    if (r.status !== "removed") continue;
+    if (!r.source.some((cited) => SOURCE.exec(cited)?.[2])) {
+      problems.push(`${r.id} is removed and pins no source at the commit before its removal`);
     }
   }
   assertEquals(problems, []);

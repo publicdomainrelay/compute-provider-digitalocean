@@ -269,7 +269,7 @@ function envObject(unit: Unit): Record<string, string> {
 
 function commandOpts(unit: Unit, script: string): Deno.CommandOptions {
   const env = envObject(unit);
-  log(`commandOpts(${unit.name}): script=${script.slice(0, 90)} JSR_URL=${env["JSR_URL"] ?? "(unset)"} envKeys=${Object.keys(env).join(",")}`);
+  log(`commandOpts(${unit.name}): script=${script.slice(0, 90)} envKeys=${Object.keys(env).join(",")}`);
   const opts: Deno.CommandOptions = {
     args: ["-c", script],
     stdout: "inherit",
@@ -341,7 +341,7 @@ async function supervisePathUnit(key: string): Promise<void> {
       return;
     }
 
-    // default: trigger <name>.service (e.g. setup-wootty.path → setup-wootty.service)
+    // default: trigger <name>.service (e.g. setup-k3s.path → setup-k3s.service)
     const triggerUnit = unit.pathUnit ?? key.replace(/\.path$/, ".service");
 
     let conditionsMet = true;

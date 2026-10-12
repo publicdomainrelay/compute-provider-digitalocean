@@ -34,7 +34,6 @@ Deno.test("defect3: /v1/on-network must verify the token signature, not just exp
     getIssuerUrl: () => ISSUER,
     logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
     acceptToContract: new Map(),
-    jsrBaseDir: new URL("../../..", import.meta.url).pathname,
   } as unknown as ComputeProviderLocalCtx;
 
   const { oidcIssuer } = createComputeProviderLocal(ctx);
