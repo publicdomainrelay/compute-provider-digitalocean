@@ -6,12 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: denoland/setup-deno@v2
-        with:
-          deno-version: "2.x"
-      - run: deno check hono-compute-provider/mod.ts
+    uses: publicdomainrelay/socialweb-computer/.github/workflows/submodule-ci.yml@main
+    with:
+      run: deno check hono-compute-provider/mod.ts
