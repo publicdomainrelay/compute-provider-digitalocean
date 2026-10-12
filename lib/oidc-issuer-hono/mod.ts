@@ -361,13 +361,20 @@ ACCEPT_URI=\$(jq -r '.accept.uri // empty' "\${ACCEPT_JSON}" 2>/dev/null)
 ACCEPT_CID=\$(jq -r '.accept.cid // empty' "\${ACCEPT_JSON}" 2>/dev/null)
 [ -z "\${ACCEPT_URI}" ] && { echo "no accept URI in accept.json"; exit 1; }
 
-# Wait for tunnel-subscriber to write its dispatcher FQDN
+# Wait for the transport (iroh listener or tunnel-subscriber) to write the address
+# a requester dials. Without it there is nothing reachable to report.
 FQDN=""
-for i in \$(seq 1 30); do
+for i in \$(seq 1 300); do
   FQDN=\$(cat /run/guest-fqdn 2>/dev/null) && [ -n "\${FQDN}" ] && break
   sleep 2
 done
-[ -z "\${FQDN}" ] && FQDN=\$(hostname 2>/dev/null || echo "guest")
+if [ -z "\${FQDN}" ]; then
+  echo "guest-onnetwork: no /run/guest-fqdn after 600s, not reporting"
+  systemctl list-jobs --no-pager 2>&1 | tail -20
+  systemctl status iroh.service tunnel-subscriber.service ssh.service --no-pager 2>&1 | tail -40
+  exit 1
+fi
+echo "guest-onnetwork: reporting \${FQDN}"
 curl -sf --retry 10 --retry-delay 5 --retry-max-time 120 \\
   -X POST "\${BASE_URL}/v1/on-network" \\
   -H "Authorization: Bearer \${TOKEN}" \\
@@ -379,16 +386,17 @@ echo "onNetwork reported OK"
 
     const onNetworkUnitContent = `[Unit]
 Description=Report onNetwork to compute provider
-After=provisioning-token.service tunnel-subscriber.service
+After=provisioning-token.service tunnel-subscriber.service iroh.service
 Wants=provisioning-token.service tunnel-subscriber.service
 ConditionPathExists=/root/secrets/publicdomainrelay.com/market/accept.json
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+TimeoutStartSec=900
 ExecStart=/usr/local/bin/send-onnetwork.sh
-StandardOutput=journal
-StandardError=journal
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
