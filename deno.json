@@ -20,6 +20,7 @@
     "./lib/abc/node-image",
     "./lib/node-image-firecracker",
     "./lib/microvm-firecracker",
+    "./lib/microvm-firecracker-userns",
     "./lib/compute-provider-firecracker"
   ],
   "imports": {
@@ -51,6 +52,7 @@
     "@publicdomainrelay/node-image-abc": "./lib/abc/node-image/mod.ts",
     "@publicdomainrelay/node-image-firecracker": "./lib/node-image-firecracker/mod.ts",
     "@publicdomainrelay/microvm-firecracker": "./lib/microvm-firecracker/mod.ts",
+    "@publicdomainrelay/microvm-firecracker-userns": "./lib/microvm-firecracker-userns/mod.ts",
     "@publicdomainrelay/compute-provider-firecracker": "./lib/compute-provider-firecracker/mod.ts",
     "@std/yaml": "jsr:@std/yaml@^1"
   },
