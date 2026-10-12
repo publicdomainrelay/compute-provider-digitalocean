@@ -7,6 +7,7 @@
     "./lib/abc/container-backend",
     "./lib/abc/compute-provider",
     "./lib/abc/oidc-issuer",
+    "./lib/abc/compute-provider-kcp",
     "./lib/container-backend-docker",
     "./lib/container-backend-container",
     "./lib/compute-provider-local",
@@ -21,7 +22,9 @@
     "./lib/abc/node-image",
     "./lib/node-image-firecracker",
     "./lib/microvm-firecracker",
-    "./lib/compute-provider-firecracker"
+    "./lib/compute-provider-firecracker",
+    "./lib/compute-provider-kcp",
+    "./lib/hono-factory-compute-provider-kcp"
   ],
   "imports": {
     "@publicdomainrelay/container-backend-common": "./lib/common/container-backend/mod.ts",

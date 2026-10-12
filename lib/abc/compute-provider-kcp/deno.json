@@ -1,0 +1,10 @@
+{
+  "name": "@publicdomainrelay/compute-provider-kcp-abc",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/compute-provider-abc": "jsr:@publicdomainrelay/compute-provider-abc@^0",
+    "@publicdomainrelay/compute-provider-kcp-common": "jsr:@publicdomainrelay/compute-provider-kcp-common@^0"
+  }
+}

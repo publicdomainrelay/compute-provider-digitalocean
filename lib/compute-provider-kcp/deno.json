@@ -1,0 +1,15 @@
+{
+  "name": "@publicdomainrelay/compute-provider-kcp",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/compute-provider-abc": "jsr:@publicdomainrelay/compute-provider-abc@^0",
+    "@publicdomainrelay/compute-provider-common": "jsr:@publicdomainrelay/compute-provider-common@^0",
+    "@publicdomainrelay/compute-provider-kcp-abc": "jsr:@publicdomainrelay/compute-provider-kcp-abc@^0",
+    "@publicdomainrelay/compute-provider-kcp-common": "jsr:@publicdomainrelay/compute-provider-kcp-common@^0",
+    "@publicdomainrelay/oidc-issuer-abc": "jsr:@publicdomainrelay/oidc-issuer-abc@^0",
+    "@publicdomainrelay/atproto-helpers": "jsr:@publicdomainrelay/atproto-helpers@^0",
+    "@publicdomainrelay/secrets-common": "jsr:@publicdomainrelay/secrets-common@^0"
+  }
+}

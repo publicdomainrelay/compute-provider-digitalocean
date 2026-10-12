@@ -1,0 +1,14 @@
+{
+  "name": "@publicdomainrelay/hono-factory-compute-provider-kcp",
+  "version": "0.0.0",
+  "license": "Unlicense",
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/compute-provider-abc": "jsr:@publicdomainrelay/compute-provider-abc@^0",
+    "@publicdomainrelay/compute-provider-common": "jsr:@publicdomainrelay/compute-provider-common@^0",
+    "@publicdomainrelay/compute-provider-kcp": "jsr:@publicdomainrelay/compute-provider-kcp@^0",
+    "@publicdomainrelay/oidc-issuer-abc": "jsr:@publicdomainrelay/oidc-issuer-abc@^0",
+    "@publicdomainrelay/oidc-issuer-hono": "jsr:@publicdomainrelay/oidc-issuer-hono@^0",
+    "@hono/hono": "jsr:@hono/hono@^4"
+  }
+}

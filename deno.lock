@@ -1410,6 +1410,12 @@
           "jsr:@publicdomainrelay/qemu-standalone@0"
         ]
       },
+      "lib/abc/compute-provider-kcp": {
+        "dependencies": [
+          "jsr:@publicdomainrelay/compute-provider-abc@0",
+          "jsr:@publicdomainrelay/compute-provider-kcp-common@0"
+        ]
+      },
       "lib/abc/container-backend": {
         "dependencies": [
           "jsr:@publicdomainrelay/container-backend-common@0"
@@ -1449,6 +1455,17 @@
           "jsr:@publicdomainrelay/secrets-common@0"
         ]
       },
+      "lib/compute-provider-kcp": {
+        "dependencies": [
+          "jsr:@publicdomainrelay/atproto-helpers@0",
+          "jsr:@publicdomainrelay/compute-provider-abc@0",
+          "jsr:@publicdomainrelay/compute-provider-common@0",
+          "jsr:@publicdomainrelay/compute-provider-kcp-abc@0",
+          "jsr:@publicdomainrelay/compute-provider-kcp-common@0",
+          "jsr:@publicdomainrelay/oidc-issuer-abc@0",
+          "jsr:@publicdomainrelay/secrets-common@0"
+        ]
+      },
       "lib/compute-provider-local": {
         "dependencies": [
           "jsr:@publicdomainrelay/atproto-helpers@0",
@@ -1474,6 +1491,16 @@
       "lib/hono-factory-compute-provider-digitalocean": {
         "dependencies": [
           "npm:hono@4"
+        ]
+      },
+      "lib/hono-factory-compute-provider-kcp": {
+        "dependencies": [
+          "jsr:@hono/hono@4",
+          "jsr:@publicdomainrelay/compute-provider-abc@0",
+          "jsr:@publicdomainrelay/compute-provider-common@0",
+          "jsr:@publicdomainrelay/compute-provider-kcp@0",
+          "jsr:@publicdomainrelay/oidc-issuer-abc@0",
+          "jsr:@publicdomainrelay/oidc-issuer-hono@0"
         ]
       },
       "lib/hono-factory-compute-provider-local": {

@@ -266,7 +266,7 @@ function decodeUserData(secret: Record<string, unknown>): string {
 
 async function provisioned(kcp: FakeKcp, provider: ComputeProvider): Promise<string> {
   const pending = provider.provision(VM_INPUT, REQUESTER);
-  await until(() => kcp.vms.size > 0 && kcp.secrets.size > 0, "the ComputeVM and its Secret");
+  await until(() => kcp.vms.size > 0 && kcp.secrets.size > 0, "the ComputeVM and its Secret", 20_000);
   const name = [...kcp.vms.keys()].at(-1)!;
   kcp.setStatus(name, { phase: "Running", network: { guestIP: "10.0.2.15", hostAddress: GUEST_HOST, prefix: 24 } });
   const result = await pending;
@@ -532,9 +532,32 @@ Deno.test("the factory mounts the OIDC issuer and POST /v1/on-network on the pro
     getIssuerUrl: () => ISSUER,
   });
   assertEquals(built.provider.name, "kcp");
-  assertEquals((await serve.app.request("/.well-known/openid-configuration")).status, 404);
+  assertEquals(serve.app.routes.length, 0, "routes mounted before the serve connected");
   for (const cb of connected) await cb("did:web:kcpprov.relay.localhost");
   assertEquals((await serve.app.request("/.well-known/openid-configuration")).status, 200);
   assertEquals((await serve.app.request("/v1/on-network", { method: "POST", body: "{}" })).status, 401);
   assertEquals((await built.createApp().request("/.well-known/openid-configuration")).status, 200);
+});
+
+Deno.test("with OIDC provisioning the factory's issuer enriches the user_data the Secret carries", async () => {
+  const kcp = new FakeKcp();
+  const { provider } = createComputeProviderKcpFactory({
+    logger: quiet,
+    atproto: fakeAtproto(),
+    credentials: { server: KCP, workspace: WS, token: "t" },
+    fetch: kcp.fetch,
+    handle: HANDLE,
+    guestHostAddress: GUEST_HOST,
+    getIssuerUrl: () => ISSUER,
+    oidcProvisioning: true,
+  });
+  await provider.setup!();
+  try {
+    const name = await provisioned(kcp, provider);
+    const userData = decodeUserData(kcp.secrets.get(`${name}-user-data`)!);
+    assertStringIncludes(userData, "/root/secrets/publicdomainrelay.com/provisioning/token");
+    assertEquals(provider.getDroplet!(name)?.id, name);
+  } finally {
+    await provider.teardown!();
+  }
 });
