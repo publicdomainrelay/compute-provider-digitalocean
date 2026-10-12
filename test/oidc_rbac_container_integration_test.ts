@@ -1,8 +1,6 @@
 import { assertEquals, assertExists } from "@std/assert";
 import {
   createOidcIssuer,
-  ProvisioningData,
-  OIDCToken,
 } from "@publicdomainrelay/oidc-issuer-hono";
 import { runContainer } from "@publicdomainrelay/compute-provider-local";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
@@ -102,12 +100,12 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
   };
 
   // ── OIDC issuer (issuerUrl uses let — resolved after server starts) ──
-  const { app } = createOidcIssuer({
+  const oidcIssuer = createOidcIssuer({
     getIssuerUrl: () => issuerUrl,
     getDroplet: (id) => id === dropletId ? droplet : undefined,
-    serviceUrl: issuerUrl,
     plcDirectoryUrl,
   });
+  const { app } = oidcIssuer;
   const issuerAc = new AbortController();
   const { promise: issuerPortReady, resolve: resolveIssuerPort } = Promise.withResolvers<number>();
   Deno.serve({ port: 0, hostname: "0.0.0.0", signal: issuerAc.signal, onListen: (addr) => resolveIssuerPort((addr as Deno.NetAddr).port) }, app.fetch);
@@ -162,7 +160,7 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
     assertEquals(Object.keys(fetched.roles).length, 1);
 
     // Create provisioning data
-    const pd = await ProvisioningData.create(actxUuid, null, issuerUrl);
+    const pd = await oidcIssuer.createProvisioningData(actxUuid, null);
     pd.associateWithDroplet(dropletId);
 
     // Launch container — onIp updates droplet BEFORE cloud-init runs prove
@@ -177,7 +175,7 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
 
     // Poll for workload token
     const workloadToken = await pollForToken(backend, info.containerName);
-    const validatedWl = await OIDCToken.validate(workloadToken);
+    const validatedWl = await oidcIssuer.validateToken(workloadToken);
     assertEquals(validatedWl.actx, actxUuid);
 
     // Use token to call /v1/oidc/issue (RBAC check)
@@ -190,7 +188,7 @@ Deno.test("[integration] Container receives workload token + RBAC issue", async 
     assertEquals(issueRes.status, 200, `Issue failed: ${JSON.stringify(issueBody)}`);
     const issuedToken = issueBody.token as string;
     assertExists(issuedToken);
-    const validatedIssue = await OIDCToken.validate(issuedToken);
+    const validatedIssue = await oidcIssuer.validateToken(issuedToken);
     assertEquals(validatedIssue.actx, actxUuid);
 
     // Unauthorized → 401

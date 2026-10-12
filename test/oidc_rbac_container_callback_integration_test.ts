@@ -1,8 +1,6 @@
 import { assertEquals, assertExists } from "@std/assert";
 import {
   createOidcIssuer,
-  ProvisioningData,
-  OIDCToken,
 } from "@publicdomainrelay/oidc-issuer-hono";
 import { runContainer } from "@publicdomainrelay/compute-provider-local";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
@@ -99,12 +97,12 @@ Deno.test("[integration] Container receives workload token via callback + RBAC i
   };
 
   // ── OIDC issuer (issuerUrl uses let — resolved after server starts) ──
-  const { app: oidcApp } = createOidcIssuer({
+  const oidcIssuer = createOidcIssuer({
     getIssuerUrl: () => issuerUrl,
     getDroplet: (id) => id === dropletId ? droplet : undefined,
-    serviceUrl: issuerUrl,
     plcDirectoryUrl,
   });
+  const { app: oidcApp } = oidcIssuer;
   const issuerAc = new AbortController();
   const { promise: issuerPortReady, resolve: resolveIssuerPort } = Promise.withResolvers<number>();
   Deno.serve({ port: 0, hostname: "0.0.0.0", signal: issuerAc.signal, onListen: (addr) => resolveIssuerPort((addr as Deno.NetAddr).port) }, oidcApp.fetch);
@@ -174,7 +172,7 @@ runcmd:
     curl -sf --json "{\\"token\\":\\"$(cat ${tokenPath})\\"}" ${callbackUrl}
 `;
 
-    const pd = await ProvisioningData.create(actxUuid, baseUserData, issuerUrl);
+    const pd = await oidcIssuer.createProvisioningData(actxUuid, baseUserData);
     pd.associateWithDroplet(dropletId);
 
     // Launch container — onIp updates droplet BEFORE cloud-init runs prove
@@ -197,7 +195,7 @@ runcmd:
     }
     console.log(`[test] Token received via callback (${workloadToken.length} chars)`);
 
-    const validatedWl = await OIDCToken.validate(workloadToken);
+    const validatedWl = await oidcIssuer.validateToken(workloadToken);
     assertEquals(validatedWl.actx, actxUuid);
 
     // /v1/oidc/issue with RBAC
@@ -210,7 +208,7 @@ runcmd:
     assertEquals(issueRes.status, 200, `Issue failed: ${JSON.stringify(issueBody)}`);
     const issuedToken = issueBody.token as string;
     assertExists(issuedToken);
-    assertEquals((await OIDCToken.validate(issuedToken)).actx, actxUuid);
+    assertEquals((await oidcIssuer.validateToken(issuedToken)).actx, actxUuid);
     console.log("[test] RBAC-protected token issuance succeeded");
 
     // Unauthorized → 401

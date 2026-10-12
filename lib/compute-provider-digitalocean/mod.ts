@@ -11,8 +11,7 @@ import type {
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
-import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
-import { createOidcIssuer, OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
 import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
 import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
 import type { ServeHandle } from "@publicdomainrelay/serve";
@@ -24,7 +23,9 @@ export interface ComputeProviderDigitalOceanCtx extends ComputeProviderCtx {
   digitaloceanBaseUrl?: string;
   doToken: string;
   rbacProvisioner?: RbacProvisioner;
-  oidcProvisioner?: OidcProvisioningEnricher;
+  oidcProvisioning?: boolean;
+  oidcJwkStore?: JwkStore;
+  oidcNonceStore?: NonceStore;
   acceptToContract?: Map<string, {
     receiptKey: string;
     receiptUri: string;
@@ -84,7 +85,6 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     digitaloceanBaseUrl = DEFAULT_DIGITALOCEAN_BASE_URL,
     doToken,
     rbacProvisioner,
-    oidcProvisioner,
     acceptToContract,
     createSignedRepoRecord,
     callService,
@@ -119,32 +119,34 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     return doctxPromise;
   }
 
+  const oidcIssuer = createOidcIssuer({
+    getIssuerUrl,
+    getDroplet: async (id: string) => {
+      try {
+        const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets/${id}`, {
+          headers: { "Authorization": `Bearer ${doToken}` },
+        });
+        if (!res.ok) return undefined;
+        const json = await res.json() as { droplet: Record<string, unknown> };
+        return json.droplet;
+      } catch {
+        return droplets.get(id) as Record<string, unknown> | undefined;
+      }
+    },
+    store: ctx.oidcJwkStore,
+    nonceStore: ctx.oidcNonceStore,
+    log: (
+      level: string,
+      msg: string,
+      extra?: Record<string, unknown>,
+    ) => {
+      logger[level as "info" | "warn" | "error" | "debug"]?.(msg, extra);
+    },
+  });
+
   serve.onConnected((ingressRef) => {
     const serviceUrl = didWebToHttps(ingressRef);
     _serviceUrl = serviceUrl;
-    const oidcIssuer = createOidcIssuer({
-      getIssuerUrl,
-      getDroplet: async (id: string) => {
-        try {
-          const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets/${id}`, {
-            headers: { "Authorization": `Bearer ${doToken}` },
-          });
-          if (!res.ok) return undefined;
-          const json = await res.json() as { droplet: Record<string, unknown> };
-          return json.droplet;
-        } catch {
-          return droplets.get(id) as Record<string, unknown> | undefined;
-        }
-      },
-      serviceUrl,
-      log: (
-        level: string,
-        msg: string,
-        extra?: Record<string, unknown>,
-      ) => {
-        logger[level as "info" | "warn" | "error" | "debug"]?.(msg, extra);
-      },
-    });
     serve.app.route("/", oidcIssuer.app as never);
     logger.info("do oidc issuer mounted", { serviceUrl });
 
@@ -176,7 +178,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
           const token = authHeader.startsWith("Bearer ")
             ? authHeader.slice("Bearer ".length)
             : authHeader;
-          const validated = await OIDCToken.validate(token).catch(() => null);
+          const validated = await oidcIssuer.validateToken(token).catch(() => null);
           if (!validated) {
             return c.json({ error: "invalid or expired token" }, 401);
           }
@@ -277,8 +279,8 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     // OIDC enrichment — actx must be the DO team UUID (from /v2/account),
     // not the requester DID or the bidder's ATProto PLC.
     const doctx = await cachedDoctx();
-    const enriched = oidcProvisioner
-      ? await oidcProvisioner.enrich(user_data, doctx.teamUuid, getIssuerUrl())
+    const enriched = ctx.oidcProvisioning
+      ? await oidcIssuer.provisioningEnricher.enrich(user_data, doctx.teamUuid)
       : { userData: user_data, nonce: "", associateWithDroplet: (_id: string) => {} };
 
     let enrichedUserData = enriched.userData;
@@ -371,6 +373,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     deleteDroplet,
     injectAcceptBundle,
     getDroplet: (id: string) => droplets.get(id),
+    oidcIssuer,
   };
 }
 

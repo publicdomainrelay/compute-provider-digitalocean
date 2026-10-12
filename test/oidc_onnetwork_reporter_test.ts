@@ -1,8 +1,8 @@
 import { assert, assertEquals } from "@std/assert";
-import { configureOidc, ProvisioningData } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 
 const ISSUER = "http://127.0.0.1:9978";
-configureOidc({ getIssuerUrl: () => ISSUER });
+const issuer = createOidcIssuer({ getIssuerUrl: () => ISSUER });
 
 function reporter(userData: string): { script: string; unit: string[] } {
   const scriptStart = userData.indexOf("#!/usr/bin/env bash", userData.indexOf("send-onnetwork.sh"));
@@ -13,14 +13,14 @@ function reporter(userData: string): { script: string; unit: string[] } {
 }
 
 Deno.test("the oidc reporter never publishes the guest's hostname as its address", async () => {
-  const { userData } = await ProvisioningData.create("reporterteam", "#cloud-config\n", ISSUER);
+  const { userData } = await issuer.createProvisioningData("reporterteam", "#cloud-config\n");
   const { script } = reporter(userData);
   assert(!script.includes("hostname"), "no hostname fallback: a bare name is not an address a requester can reach");
   assert(script.includes("/run/guest-fqdn"), "reads the rendezvous file the transport writes");
 });
 
 Deno.test("the oidc reporter waits for the transport long enough for a slow boot and says why when it gives up", async () => {
-  const { userData } = await ProvisioningData.create("reporterteam", "#cloud-config\n", ISSUER);
+  const { userData } = await issuer.createProvisioningData("reporterteam", "#cloud-config\n");
   const { script, unit } = reporter(userData);
   const waits = [...script.matchAll(/seq 1 (\d+)\); do\s+FQDN=/g)].map((m) => Number(m[1]));
   assertEquals(waits.length, 1);

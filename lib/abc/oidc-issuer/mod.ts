@@ -17,8 +17,8 @@ export function parseAudience(aud: string): { actx: string; api: string } {
 }
 
 export interface JwkStore {
-  getJwkPem(issuer: string): string | null;
-  saveJwkPem(issuer: string, pem: string): void;
+  getJwkPem(issuer: string): string | null | Promise<string | null>;
+  saveJwkPem(issuer: string, pem: string): void | Promise<void>;
 }
 
 export interface OIDCTokenData {
@@ -41,18 +41,25 @@ export interface ProvisioningDataInit {
   userData: string;
 }
 
-export interface OidcIssuerOptions {
-  getIssuerUrl: () => string;
-  getDroplet: (id: string) => Record<string, unknown> | undefined | Promise<Record<string, unknown> | undefined>;
-  /** @deprecated No longer used — getIssuerUrl() provides the live URL. */
-  serviceUrl?: string;
-  plcDirectoryUrl?: string;
-  log?: Logger;
-  onIssuerUrl?: (baseUrl: string) => void | Promise<void>;
+export interface ProvisioningData extends ProvisioningDataInit {
+  associateWithDroplet(dropletId: string): void;
 }
 
-export interface OidcIssuer {
-  app: { fetch: (req: Request) => Response | Promise<Response> };
+export type DropletGetter = (
+  id: string,
+) => Record<string, unknown> | undefined | Promise<Record<string, unknown> | undefined>;
+
+export type IssuersForAudience = (api: string, actx: string) => Promise<string[]> | string[];
+
+export interface OidcIssuerOptions {
+  getIssuerUrl: () => string;
+  getDroplet?: DropletGetter;
+  plcDirectoryUrl?: string;
+  log?: Logger;
+  store?: JwkStore;
+  nonceStore?: NonceStore;
+  trustedIssuerUrls?: string[];
+  defaultTtlSeconds?: number;
 }
 
 export interface AuthToken {
@@ -63,9 +70,25 @@ export interface AuthToken {
 }
 
 export interface OidcProvisioningEnricher {
-  enrich(userData: string, teamUuid: string, issuerUrl: string): Promise<{
+  enrich(userData: string | null, teamUuid: string): Promise<{
     userData: string;
     nonce: string;
     associateWithDroplet(dropletId: string): void;
   }>;
+}
+
+export interface OidcIssuer {
+  app: { fetch: (req: Request) => Response | Promise<Response> };
+  getIssuerUrl(): string;
+  getSigningKey(): Promise<CryptoKeyPair>;
+  getPublicJwk(): Promise<JsonWebKey & { kid?: string }>;
+  createToken(actx: string, claims: Record<string, unknown>, api?: string): Promise<OIDCTokenData>;
+  validateToken(token: string, getIssuers?: IssuersForAudience): Promise<OIDCTokenData>;
+  raiseIfUnauthorized(service: string, scope: string, token: string, path: string, method: string): Promise<AuthToken>;
+  createProvisioningData(
+    teamUuid: string,
+    userData: string | null,
+    opts?: { ttl?: number; nonceLen?: number },
+  ): Promise<ProvisioningData>;
+  provisioningEnricher: OidcProvisioningEnricher;
 }

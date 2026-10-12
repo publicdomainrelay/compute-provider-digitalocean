@@ -1,9 +1,8 @@
 import { assertEquals, assertExists } from "@std/assert";
 import {
+  createMemoryJwkStore,
+  createMemoryNonceStore,
   createOidcIssuer,
-  createOidcProvisioningEnricher,
-  ProvisioningData,
-  OIDCToken,
 } from "@publicdomainrelay/oidc-issuer-hono";
 import { pollSsh } from "@publicdomainrelay/compute-provider-local";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
@@ -141,14 +140,17 @@ async function runArm(arm: Arm): Promise<void> {
     tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
   };
 
-  const { app } = createOidcIssuer({
+  const oidcJwkStore = createMemoryJwkStore();
+  const oidcNonceStore = createMemoryNonceStore();
+  const oidcIssuer = createOidcIssuer({
     getIssuerUrl: () => issuerUrl,
+    store: oidcJwkStore,
+    nonceStore: oidcNonceStore,
     // The firecracker arm's provider names its own guests, so the record is
     // returned for whichever id the issuer is asked about: what is under test
     // here is that the guest proves its identity and is handed a token, not
     // that a particular provider keys its lookup the same way.
     getDroplet: (id) => (arm === "qemu" && id !== dropletId ? undefined : droplet),
-    serviceUrl: issuerUrl,
     plcDirectoryUrl,
     log: (level, message, meta) => {
       if (level === "warn" || level === "error") {
@@ -156,6 +158,7 @@ async function runArm(arm: Arm): Promise<void> {
       }
     },
   });
+  const { app } = oidcIssuer;
   const issuerAc = new AbortController();
   const { promise: issuerPortReady, resolve: resolveIssuerPort } = Promise.withResolvers<number>();
   Deno.serve({ port: 0, hostname: "0.0.0.0", signal: issuerAc.signal, onListen: (addr) => resolveIssuerPort((addr as Deno.NetAddr).port) }, app.fetch);
@@ -226,7 +229,7 @@ runcmd:
     let ip = "";
 
     if (arm === "qemu") {
-      const pd = await ProvisioningData.create(actxUuid, baseUserData, issuerUrl);
+      const pd = await oidcIssuer.createProvisioningData(actxUuid, baseUserData);
       pd.associateWithDroplet(dropletId);
 
       const cacheDir = qemuCacheDir();
@@ -300,7 +303,9 @@ runcmd:
           runnerImage: Deno.env.get(FIRECRACKER_ENV.runnerImage)!,
         }),
         workRoot,
-        oidcProvisioner: createOidcProvisioningEnricher(() => issuerUrl),
+        oidcProvisioning: true,
+        oidcJwkStore,
+        oidcNonceStore,
       });
 
       const result = await provider.provider.provision(
@@ -336,7 +341,7 @@ runcmd:
     }
     console.log(`[${arm}] token received (${workloadToken.length} chars)`);
 
-    const validatedWl = await OIDCToken.validate(workloadToken);
+    const validatedWl = await oidcIssuer.validateToken(workloadToken);
     assertEquals(validatedWl.actx, actxUuid);
 
     const issueRes = await fetch(`${issuerUrl}/v1/oidc/issue`, {
@@ -348,7 +353,7 @@ runcmd:
     assertEquals(issueRes.status, 200, `Issue failed: ${JSON.stringify(issueBody)}`);
     const issuedToken = issueBody.token as string;
     assertExists(issuedToken);
-    assertEquals((await OIDCToken.validate(issuedToken)).actx, actxUuid);
+    assertEquals((await oidcIssuer.validateToken(issuedToken)).actx, actxUuid);
     console.log(`[${arm}] RBAC-protected token issuance succeeded`);
 
     assertEquals(

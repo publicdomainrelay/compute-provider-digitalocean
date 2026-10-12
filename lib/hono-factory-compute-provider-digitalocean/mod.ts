@@ -4,7 +4,7 @@ import type { Hono } from "hono";
 import { registerErrorMiddleware } from "@publicdomainrelay/hono-error-middleware";
 import { COMPUTE_VM_NSID, ON_BEHALF_OF_HEADER } from "@publicdomainrelay/compute-provider-common";
 import type { LoggerInterface } from "@publicdomainrelay/logger";
-import { createOidcIssuer, createOidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 import { verifyServiceAuthOrThrow } from "@publicdomainrelay/rbac-atproto";
 
 export interface DropletCreateRequest {
@@ -80,7 +80,6 @@ export function createComputeProviderDigitalOceanFactory(
 
   const dropletsByActx = new Map<string, Map<number, Droplet>>();
 
-  const oidcProvisioningEnricher = createOidcProvisioningEnricher(getIssuerUrl);
 
   function getDropletsMap(actx: string): Map<number, Droplet> {
     let m = dropletsByActx.get(actx);
@@ -100,7 +99,6 @@ export function createComputeProviderDigitalOceanFactory(
   const oidcIssuer = createOidcIssuer({
     getIssuerUrl,
     getDroplet: getDropletById,
-    serviceUrl: getIssuerUrl(),
     log: (level, msg, extra) => {
       if (level === "info") log.info(msg, extra);
       else if (level === "warn") log.warn(msg, extra);
@@ -108,6 +106,7 @@ export function createComputeProviderDigitalOceanFactory(
       else log.info(msg, extra);
     },
   });
+  const oidcProvisioningEnricher = oidcIssuer.provisioningEnricher;
 
   const factory = createFactory<ComputeProviderDigitalOceanEnv>({
     initApp: (app) => {
@@ -161,7 +160,7 @@ export function createComputeProviderDigitalOceanFactory(
           const actx = c.get("actx");
           log.info("droplets.create -> DO proxy", { name: body.name, actx });
 
-          const enriched = await oidcProvisioningEnricher.enrich(body.user_data ?? "", actx, getIssuerUrl());
+          const enriched = await oidcProvisioningEnricher.enrich(body.user_data ?? "", actx);
           body.user_data = enriched.userData;
           enriched.associateWithDroplet(body.name);
 

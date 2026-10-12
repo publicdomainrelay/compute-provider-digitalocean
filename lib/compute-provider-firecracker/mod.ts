@@ -20,8 +20,7 @@ import type {
 } from "@publicdomainrelay/compute-provider-abc";
 import type { NodeImageStore } from "@publicdomainrelay/node-image-abc";
 import type { Microvm, MicrovmExit } from "@publicdomainrelay/microvm-firecracker";
-import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
-import { createOidcIssuer, OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import { DEFAULT_ACCEPT_PATH_VM } from "@publicdomainrelay/secrets-common";
 import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
@@ -55,7 +54,9 @@ export interface ComputeProviderFirecrackerCtx extends ComputeProviderCtx {
   reuseStale?: boolean;
   guestTlsPort?: number;
   jsrBaseDir?: string;
-  oidcProvisioner?: OidcProvisioningEnricher;
+  oidcProvisioning?: boolean;
+  oidcJwkStore?: JwkStore;
+  oidcNonceStore?: NonceStore;
   hostBootId?: () => Promise<string>;
   acceptToContract?: Map<string, GuestContractEntry>;
   createSignedRepoRecord?: (
@@ -344,7 +345,7 @@ export function onNetworkReporterModule(
 
 /**
  * Compose the FQDN reporter into a guest's user_data. A user_data that already
- * carries a guest-onnetwork unit (an `oidcProvisioner` composed one) is left
+ * carries a guest-onnetwork unit (an `oidcProvisioning` composed one) is left
  * alone: two reporters would race to publish the same event.
  */
 /**
@@ -604,6 +605,28 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
   const hostBootId = ctx.hostBootId ?? readHostBootId;
 
   const guests = new Map<string, Guest>();
+
+  const dropletForIssuer = (id: string): Record<string, unknown> | undefined => {
+    const guest = guests.get(id);
+    if (!guest) return undefined;
+    return {
+      id,
+      containerName: guest.name,
+      tags: [`oidc-sub:plc:${guest.requesterPlc}`, `oidc-sub:role:${guest.role}`],
+      networks: { v4: [{ ip_address: guest.network.guestIp, type: "public" }] },
+    };
+  };
+
+  const oidcIssuer = createOidcIssuer({
+    getIssuerUrl: ctx.getIssuerUrl,
+    getDroplet: dropletForIssuer,
+    store: ctx.oidcJwkStore,
+    nonceStore: ctx.oidcNonceStore,
+    log: (level: string, msg: string, extra?: Record<string, unknown>) => {
+      const at = level as "info" | "warn" | "error" | "debug";
+      if (typeof ctx.logger?.[at] === "function") ctx.logger[at](msg, extra);
+    },
+  });
   const rbacByProvider = new Map<string | number, StrongRef>();
   const watches = new Map<string, () => void>();
   const goneListeners = new Set<(gone: GuestGone) => void>();
@@ -700,8 +723,8 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     const record: GuestRecord = { version: 1, guest, index, hostBootId: await hostBootId() };
     await Deno.writeTextFile(`${workDir}/${GUEST_RECORD}`, JSON.stringify(record, null, 2));
 
-    const enriched = ctx.oidcProvisioner
-      ? await ctx.oidcProvisioner.enrich(vm.user_data, atproto.getAgentDid().split(":").slice(-1)[0], ctx.getIssuerUrl())
+    const enriched = ctx.oidcProvisioning
+      ? await oidcIssuer.provisioningEnricher.enrich(vm.user_data, atproto.getAgentDid().split(":").slice(-1)[0])
       : { userData: vm.user_data, nonce: "", associateWithDroplet: (_id: string) => {} };
     const reported = withOnNetworkBaseUrl(
       withOnNetworkReporter(enriched.userData, ctx.getIssuerUrl(), acceptPathVm),
@@ -897,7 +920,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
       const authHeader = c.req.header("Authorization");
       const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
       if (!token) return c.json({ error: "AuthenticationRequired" }, 401);
-      const validated = await OIDCToken.validate(token).catch(() => null);
+      const validated = await oidcIssuer.validateToken(token).catch(() => null);
       if (!validated) return c.json({ error: "InvalidToken" }, 401);
       let body: Record<string, unknown>;
       try {
@@ -949,7 +972,18 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     logger.info("firecracker guest event routes mounted", {});
   }
 
-  return { ensureImage, createBidConfig, provision, destroy, adopt, onConnected, onGuestGone, guests };
+  return {
+    ensureImage,
+    createBidConfig,
+    provision,
+    destroy,
+    adopt,
+    onConnected,
+    onGuestGone,
+    guests,
+    dropletForIssuer,
+    oidcIssuer,
+  };
 }
 
 export function parseMemMiB(mem: unknown): number | undefined {
@@ -972,44 +1006,9 @@ export function parseMemMiB(mem: unknown): number | undefined {
 export function createFirecrackerComputeProvider(ctx: ComputeProviderFirecrackerCtx) {
   const inner = createComputeProviderFirecracker(ctx);
 
-  // The droplet the issuer sees, which is not the droplet the market sees: the
-  // prove handler resolves the guest's ssh host key by scanning it from inside
-  // the container the guest runs in, so it needs that container's name, and it
-  // rebuilds the subject of the token it issues out of the oidc-sub tags. Both
-  // are properties of the guest this provider already holds.
-  const dropletForIssuer = (id: string): Record<string, unknown> | undefined => {
-    const guest = inner.guests.get(id);
-    if (!guest) return undefined;
-    return {
-      id,
-      containerName: guest.name,
-      tags: [`oidc-sub:plc:${guest.requesterPlc}`, `oidc-sub:role:${guest.role}`],
-      networks: { v4: [{ ip_address: guest.network.guestIp, type: "public" }] },
-    };
-  };
-
   ctx.serve.onConnected((ingressRef) => {
     inner.onConnected(ctx.serve.app);
-
-    // The guest's user_data carries provisioning-token.service, which exchanges
-    // the token it is handed at <issuer>/v1/oidc/prove for one that names the
-    // requester's PLC and the role, and setup-secrets.service fetches the
-    // accept bundle with it. The other providers that compose that same
-    // user_data -- local and digitalocean -- each mount this issuer on their own
-    // serve; without it here the route the guest is told to call answers 404,
-    // the token exchange fails, no accept bundle is ever written, and the guest
-    // reports no tunnel address, which reads as a guest that never joined
-    // rather than as an issuer that was never mounted.
-    const oidcIssuer = createOidcIssuer({
-      getIssuerUrl: ctx.getIssuerUrl,
-      getDroplet: dropletForIssuer,
-      serviceUrl: didWebToHttps(ingressRef),
-      log: (level: string, msg: string, extra?: Record<string, unknown>) => {
-        const at = level as "info" | "warn" | "error" | "debug";
-        if (typeof ctx.logger?.[at] === "function") ctx.logger[at](msg, extra);
-      },
-    });
-    ctx.serve.app.route("/", oidcIssuer.app as never);
+    ctx.serve.app.route("/", inner.oidcIssuer.app as never);
     ctx.logger?.info("firecracker oidc issuer mounted", { serviceUrl: didWebToHttps(ingressRef) });
   });
   const provider: ComputeProvider = {
@@ -1024,10 +1023,10 @@ export function createFirecrackerComputeProvider(ctx: ComputeProviderFirecracker
     createBidConfig: inner.createBidConfig,
     injectAcceptBundle: (userData: string, bundle: Record<string, unknown>) =>
       injectAcceptBundle(userData, bundle, ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM),
-    getDroplet: dropletForIssuer,
+    getDroplet: inner.dropletForIssuer,
     setup: async () => {
       await inner.ensureImage();
     },
   };
-  return { provider, ensureImage: inner.ensureImage, onConnected: inner.onConnected };
+  return { provider, ensureImage: inner.ensureImage, onConnected: inner.onConnected, oidcIssuer: inner.oidcIssuer };
 }

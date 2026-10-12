@@ -1,10 +1,6 @@
 import { assertEquals, assertExists, assertRejects } from "@std/assert";
 import { Hono } from "hono";
-import {
-  configureOidc,
-  createOidcIssuer,
-  OIDCToken,
-} from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 import { createPlcDirectory } from "./plc_directory.ts";
 
 const RBAC_NSID = "com.fedproxy.rbac";
@@ -115,12 +111,12 @@ Deno.test("[defect9] the gate pins its trusted issuers to configuration, never t
   registerDid(legitDid, pds.url);
 
   let issuerUrl = "";
-  const { app } = createOidcIssuer({
+  const oidcIssuer = createOidcIssuer({
     getIssuerUrl: () => issuerUrl,
     getDroplet: () => undefined,
-    serviceUrl: issuerUrl,
     plcDirectoryUrl: plc.url,
   });
+  const { app } = oidcIssuer;
   const provider = await serve(app.fetch);
   issuerUrl = provider.url;
 
@@ -174,13 +170,13 @@ Deno.test("[defect9] the gate pins its trusted issuers to configuration, never t
   );
   let callbackResult = "admitted";
   try {
-    await OIDCToken.validate(attackToken, () => [attackerIssuerUrl]);
+    await oidcIssuer.validateToken(attackToken, () => [attackerIssuerUrl]);
   } catch (err) {
     callbackResult = `rejected: ${String(err)}`;
   }
   console.log("CALLBACK (issuer handed in by getIssuers, unconfigured):", callbackResult);
 
-  const legitToken = await OIDCToken.create(legitUuid, { sub: legitSub });
+  const legitToken = await oidcIssuer.createToken(legitUuid, { sub: legitSub });
   const legitRes = await fetch(`${issuerUrl}/v1/oidc/issue`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${legitToken.asString}` },
@@ -199,16 +195,25 @@ Deno.test("[defect9] the gate pins its trusted issuers to configuration, never t
     401,
     "naming another actx must not admit the attacker: the record read from THAT repo names no attacker-controllable issuer",
   );
-  await assertRejects(() => OIDCToken.validate(attackToken, () => [attackerIssuerUrl]));
+  await assertRejects(() => oidcIssuer.validateToken(attackToken, () => [attackerIssuerUrl]));
   assertEquals(legitRes.status, 200, `provider-minted token must still be admitted: ${legitBody}`);
   assertExists(JSON.parse(legitBody).token);
 
-  configureOidc({ trustedIssuerUrls: [attackerIssuerUrl] });
-  const admitted = await OIDCToken.validate(attackToken, () => [attackerIssuerUrl]);
+  const trusting = createOidcIssuer({
+    getIssuerUrl: () => issuerUrl,
+    plcDirectoryUrl: plc.url,
+    trustedIssuerUrls: [attackerIssuerUrl],
+  });
+  const admitted = await trusting.validateToken(attackToken, () => [attackerIssuerUrl]);
   console.log("ALLOWLIST(issuer named in configuration):", admitted.actx, admitted.sub);
   assertEquals(admitted.actx, attackUuid);
   assertEquals(admitted.sub, attackSub);
-
+  await assertRejects(
+    () => oidcIssuer.validateToken(attackToken, () => [attackerIssuerUrl]),
+    Error,
+    undefined,
+    "another issuer's trust list never widens this issuer's",
+  );
 
   attacker.abort();
   pds.abort();

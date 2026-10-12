@@ -1,8 +1,6 @@
 import { assertEquals, assertExists } from "@std/assert";
 import {
   createOidcIssuer,
-  ProvisioningData,
-  OIDCToken,
 } from "@publicdomainrelay/oidc-issuer-hono";
 import {
   resolvePDS,
@@ -111,12 +109,12 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
   };
   dropletById.set(dropletId, dropletRecord);
 
-  const { app } = createOidcIssuer({
+  const oidcIssuer = createOidcIssuer({
     getIssuerUrl: () => issuerUrl,
     getDroplet: (id) => dropletById.get(id),
-    serviceUrl: issuerUrl,
     plcDirectoryUrl,
   });
+  const { app } = oidcIssuer;
 
   const issuerAc = new AbortController();
   const { promise: issuerPortReady, resolve: resolveIssuerPort } = Promise.withResolvers<number>();
@@ -181,7 +179,7 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     assertEquals(fetchedRbac.roles[roleName].definition.sub, subject);
 
     // ── 10. Create provisioning data → prove → get workload token ───
-    const provisioningData = await ProvisioningData.create(actxUuid, null, issuerUrl);
+    const provisioningData = await oidcIssuer.createProvisioningData(actxUuid, null);
     provisioningData.associateWithDroplet(dropletId);
 
     const tokenData = provisioningData.token.asString;
@@ -210,7 +208,7 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     const workloadToken = proveBody.token as string;
     assertExists(workloadToken);
 
-    const validatedWl = await OIDCToken.validate(workloadToken);
+    const validatedWl = await oidcIssuer.validateToken(workloadToken);
     assertEquals(validatedWl.actx, actxUuid);
 
     // ── 11. Call /v1/oidc/issue with workload token (RBAC check) ────
@@ -228,7 +226,7 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     const issuedToken = issueBody.token as string;
     assertExists(issuedToken);
 
-    const validatedIssue = await OIDCToken.validate(issuedToken);
+    const validatedIssue = await oidcIssuer.validateToken(issuedToken);
     assertEquals(validatedIssue.actx, actxUuid);
 
     // ── 12. Test: unauthorized caller (no token) → 401 ──────────────
@@ -244,7 +242,7 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     const noRbacDid = `did:plc:${noRbacUuid}`;
     registerDid(noRbacDid, pdsUrl);
 
-    const noRbacProvisioning = await ProvisioningData.create(noRbacUuid, null, issuerUrl);
+    const noRbacProvisioning = await oidcIssuer.createProvisioningData(noRbacUuid, null);
     const noRbacDropletId = crypto.randomUUID().slice(0, 8);
     const noRbacDroplet = {
       id: noRbacDropletId,
@@ -301,7 +299,7 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     const writtenToken = await Deno.readTextFile(`${secretsDir}/token`);
     assertEquals(writtenToken, issuedToken);
 
-    const reValidated = await OIDCToken.validate(writtenToken);
+    const reValidated = await oidcIssuer.validateToken(writtenToken);
     assertEquals(reValidated.actx, actxUuid);
   } finally {
     issuerAc.abort();

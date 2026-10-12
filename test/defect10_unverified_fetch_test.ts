@@ -1,6 +1,6 @@
 import { assertEquals, assertExists } from "@std/assert";
 import { Hono } from "hono";
-import { createOidcIssuer, OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 import { createPlcDirectory } from "./plc_directory.ts";
 
 const RBAC_NSID = "com.fedproxy.rbac";
@@ -177,12 +177,12 @@ Deno.test("[defect10] no server-side fetch derived from an unverified aud, per D
   const internalLookingActx = "metadata-google-internal";
   registerDid(plcDid, pdsPlc.url);
 
-  const { app } = createOidcIssuer({
+  const oidcIssuer = createOidcIssuer({
     getIssuerUrl: () => issuerUrl,
     getDroplet: () => undefined,
-    serviceUrl: issuerUrl,
     plcDirectoryUrl: plcUrl,
   });
+  const { app } = oidcIssuer;
   const provider = await serve(app.fetch);
   issuerUrl = provider.url;
   const providerHost = new URL(issuerUrl).host;
@@ -255,7 +255,7 @@ Deno.test("[defect10] no server-side fetch derived from an unverified aud, per D
   //     registered under the pinned directory must still be admitted — and the
   //     RBAC fetch must still happen, so this is a reorder and not a removal.
   const beforeControl = mark();
-  const controlToken = await OIDCToken.create(plcUuid, { sub: plcSub });
+  const controlToken = await oidcIssuer.createToken(plcUuid, { sub: plcSub });
   const control = await post(controlToken.asString, { sub: plcSub, ttl: 3600 });
   const controlHits = since(beforeControl);
   measurements.push(

@@ -8,7 +8,7 @@ import { spawnVM, defaultCacheDir } from "@publicdomainrelay/compute-provider-lo
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createContainerBackend } from "@publicdomainrelay/container-backend-container";
 import { createDockerBackend } from "@publicdomainrelay/container-backend-docker";
-import { createOidcIssuer, createOidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 import { createRbacProvisioner, verifyServiceAuthOrThrow } from "@publicdomainrelay/rbac-atproto";
 import { COMPUTE_VM_NSID } from "@publicdomainrelay/compute-provider-common";
 
@@ -111,7 +111,6 @@ export function createComputeProviderLocalFactory(
 
   const dropletsByActx = new Map<string, Map<string, Droplet>>();
 
-  const oidcProvisioningEnricher = createOidcProvisioningEnricher(getIssuerUrl);
   const rbacProvisioner = createRbacProvisioner();
 
   function getDropletsMap(actx: string): Map<string, Droplet> {
@@ -132,7 +131,6 @@ export function createComputeProviderLocalFactory(
   const oidcIssuer = createOidcIssuer({
     getIssuerUrl,
     getDroplet: getDropletById,
-    serviceUrl: getIssuerUrl(),
     log: (level, msg, extra) => {
       if (level === "info") log.info(msg, extra);
       else if (level === "warn") log.warn(msg, extra);
@@ -140,6 +138,7 @@ export function createComputeProviderLocalFactory(
       else log.info(msg, extra);
     },
   });
+  const oidcProvisioningEnricher = oidcIssuer.provisioningEnricher;
 
   const factory = createFactory<ComputeProviderLocalEnv>({
     initApp: (app) => {
@@ -191,7 +190,7 @@ export function createComputeProviderLocalFactory(
           const droplet = makeDroplet(body);
           getDropletsMap(actx).set(droplet.id, droplet);
 
-          const enriched = await oidcProvisioningEnricher.enrich(body.user_data ?? "", actx, getIssuerUrl());
+          const enriched = await oidcProvisioningEnricher.enrich(body.user_data ?? "", actx);
           body.user_data = enriched.userData;
           enriched.associateWithDroplet(droplet.id);
 
@@ -266,7 +265,7 @@ export function createComputeProviderLocalFactory(
       });
       getDropletsMap(actx).set(droplet.id, droplet);
 
-      const enriched = await oidcProvisioningEnricher.enrich(vm.user_data ?? null, actx, getIssuerUrl());
+      const enriched = await oidcProvisioningEnricher.enrich(vm.user_data ?? null, actx);
       enriched.associateWithDroplet(droplet.id);
 
       log.info("provisionDroplet -> local container", {

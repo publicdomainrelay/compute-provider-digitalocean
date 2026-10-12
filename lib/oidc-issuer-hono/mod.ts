@@ -5,25 +5,38 @@ import * as jose from "jose";
 import type { Logger } from "@publicdomainrelay/logger";
 import { noopLogger } from "@publicdomainrelay/logger";
 import {
-  JwkStore,
-  NonceStore,
-  type OIDCTokenData,
-  type OidcIssuerOptions,
-  type OidcIssuer,
-  type OidcProvisioningEnricher,
-  type ProvisioningDataInit,
   type AuthToken,
-  UnauthorizedException,
+  type DropletGetter,
+  type IssuersForAudience,
+  type JwkStore,
+  type NonceStore,
+  type OIDCTokenData,
+  type OidcIssuer,
+  type OidcIssuerOptions,
+  type OidcProvisioningEnricher,
+  type ProvisioningData,
   parseAudience,
+  UnauthorizedException,
 } from "@publicdomainrelay/oidc-issuer-abc";
 import {
-  resolvePDS,
-  getRBACRecord,
-  collectIssuers,
   checkRBACPolicy,
+  collectIssuers,
+  getRBACRecord,
+  resolvePDS,
 } from "@publicdomainrelay/rbac-atproto";
 
-export type { Logger, JwkStore, NonceStore, OIDCTokenData, OidcIssuerOptions, OidcIssuer };
+export type {
+  AuthToken,
+  DropletGetter,
+  JwkStore,
+  Logger,
+  NonceStore,
+  OIDCTokenData,
+  OidcIssuer,
+  OidcIssuerOptions,
+  OidcProvisioningEnricher,
+  ProvisioningData,
+};
 export { UnauthorizedException };
 
 export function extractBearer(authHeader: string | undefined): string {
@@ -39,123 +52,233 @@ function subMatchesActx(sub: string | undefined, actx: string): boolean {
   return sub === `actx:${actx}` || sub.startsWith(`actx:${actx}:`);
 }
 
-function createMemoryJwkStore(): JwkStore {
+export function createMemoryJwkStore(): JwkStore {
   const m = new Map<string, string>();
   return {
     getJwkPem: (issuer) => m.get(issuer) ?? null,
-    saveJwkPem: (issuer, pem) => { m.set(issuer, pem); },
+    saveJwkPem: (issuer, pem) => {
+      m.set(issuer, pem);
+    },
   };
 }
 
-let _getIssuerUrl: () => string = () => {
-  throw new Error("oidc-issuer not configured: call configureOidc({ getIssuerUrl }) first");
-};
-let _jwkStore: JwkStore = createMemoryJwkStore();
-let _defaultTtlSeconds = 60 * 60 * 24;
-let _signingKey: Promise<CryptoKeyPair> | null = null;
-let _publicJwk: Promise<jose.JWK> | null = null;
-let _trustedIssuerUrls: string[] = [];
-
-export interface TrustedIssuerOptions {
-  trustedIssuerUrls?: string[];
+export function createMemoryNonceStore(): NonceStore {
+  const m = new Map<string, string>();
+  return {
+    createProvisioningNonce: (nonce, dropletId) => {
+      m.set(nonce, dropletId);
+    },
+    getProvisioningNonceDropletId: (nonce) => {
+      const id = m.get(nonce);
+      if (id === undefined) throw new Error(`Nonce ${nonce} not found`);
+      m.delete(nonce);
+      return id;
+    },
+  };
 }
 
-export function configureOidc(cfg: {
-  getIssuerUrl?: () => string;
-  store?: JwkStore;
-  defaultTtlSeconds?: number;
-  trustedIssuerUrls?: string[];
-}): void {
-  if (cfg.getIssuerUrl) _getIssuerUrl = cfg.getIssuerUrl;
-  if (cfg.store) _jwkStore = cfg.store;
-  if (typeof cfg.defaultTtlSeconds === "number") _defaultTtlSeconds = cfg.defaultTtlSeconds;
-  if (cfg.trustedIssuerUrls) _trustedIssuerUrls = [...cfg.trustedIssuerUrls];
-}
+const DEFAULT_TOKEN_TTL_SECONDS = 60 * 60 * 24;
+const DEFAULT_NONCE_LEN = 64;
+const DEFAULT_PROVISIONING_TTL_SECONDS = 60 * 15;
 
-export function getSigningKey(): Promise<CryptoKeyPair> {
-  _signingKey ??= loadOrGenerateSigningKey().catch((err) => {
-    _signingKey = null;
-    throw err;
-  });
-  return _signingKey;
-}
-
-async function loadOrGenerateSigningKey(): Promise<CryptoKeyPair> {
-  const issuer = _getIssuerUrl();
-  const storedPem = _jwkStore.getJwkPem(issuer);
-  if (storedPem) {
-    const pemBody = storedPem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
-    const der = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
-    const priv = await crypto.subtle.importKey(
-      "pkcs8", der,
-      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-      true, ["sign"],
-    );
-    const jwk = await jose.exportJWK(priv);
-    const pubJwk = { ...jwk, d: undefined, dp: undefined, dq: undefined, p: undefined, q: undefined, qi: undefined };
-    const pub = await crypto.subtle.importKey(
-      "jwk", pubJwk,
-      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-      true, ["verify"],
-    );
-    return { privateKey: priv, publicKey: pub };
-  }
-  const generated = await crypto.subtle.generateKey(
-    { name: "RSASSA-PKCS1-v1_5", modulusLength: 4096, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+async function signingKeyFromPem(storedPem: string): Promise<CryptoKeyPair> {
+  const pemBody = storedPem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+  const der = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+  const priv = await crypto.subtle.importKey(
+    "pkcs8",
+    der,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     true,
-    ["sign", "verify"],
+    ["sign"],
   );
-  const pem = await jose.exportPKCS8(generated.privateKey);
-  _jwkStore.saveJwkPem(issuer, pem);
-  return generated;
+  const jwk = await jose.exportJWK(priv);
+  const pubJwk = { ...jwk, d: undefined, dp: undefined, dq: undefined, p: undefined, q: undefined, qi: undefined };
+  const pub = await crypto.subtle.importKey(
+    "jwk",
+    pubJwk,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    true,
+    ["verify"],
+  );
+  return { privateKey: priv, publicKey: pub };
 }
 
-export function getPublicJwk(): Promise<jose.JWK> {
-  _publicJwk ??= derivePublicJwk().catch((err) => {
-    _publicJwk = null;
-    throw err;
-  });
-  return _publicJwk;
-}
+async function getPublicKeyFromSshd(
+  publicIpv4: string,
+  port: number,
+  containerName?: string,
+): Promise<string> {
+  const containerCli = (() => {
+    try {
+      Deno.statSync("/usr/local/bin/container");
+      return "/usr/local/bin/container";
+    } catch {
+      return "docker";
+    }
+  })();
+  const deadline = Date.now() + 300_000;
+  while (Date.now() < deadline) {
+    try {
+      let cmd: Deno.Command;
+      if (containerName) {
+        cmd = new Deno.Command(containerCli, {
+          args: ["exec", containerName, "ssh-keyscan", "-t", "ed25519", "-p", String(port), "127.0.0.1"],
+          stdout: "piped",
+          stderr: "piped",
+        });
+      } else {
+        cmd = new Deno.Command("ssh-keyscan", {
+          args: ["-t", "ed25519", "-p", String(port), publicIpv4],
+          stdout: "piped",
+          stderr: "piped",
+        });
+      }
+      const { code, stdout } = await cmd.output();
+      const out = new TextDecoder().decode(stdout).trim();
 
-async function derivePublicJwk(): Promise<jose.JWK> {
-  const keys = await getSigningKey();
-  const jwk = await jose.exportJWK(keys.publicKey);
-  jwk.use = "sig";
-  jwk.alg = "RS256";
-  jwk.kid = await jose.calculateJwkThumbprint(jwk);
-  return jwk;
-}
-
-const jwksCache = new Map<string, ReturnType<typeof jose.createRemoteJWKSet>>();
-
-function getRemoteJwks(jwksUri: string) {
-  if (!jwksCache.has(jwksUri)) {
-    jwksCache.set(jwksUri, jose.createRemoteJWKSet(new URL(jwksUri)));
+      if (code === 0) {
+        const line = out.split("\n").find((l) => l.includes("ed25519"));
+        if (line) {
+          const parts = line.split(" ");
+          return parts.slice(1).join(" ");
+        }
+      }
+    } catch {
+      /* retry */
+    }
+    await new Promise((r) => setTimeout(r, 2_000));
   }
-  return jwksCache.get(jwksUri)!;
+  throw new Error(`ssh-keyscan timed out for ${publicIpv4}:${port}`);
 }
 
-export class OIDCToken implements OIDCTokenData {
-  actx!: string;
-  api!: string;
-  aud!: string;
-  sub!: string;
-  claims!: Record<string, unknown>;
-  asString!: string;
+async function validateSshSignature(
+  publicKeyOpensshString: string,
+  sshSignatureBlob: string,
+  dataThatWasSigned: string,
+): Promise<boolean> {
+  const tmpDir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(`${tmpDir}/allowed_signing_key.pub`, `* ${publicKeyOpensshString}`);
+    await Deno.writeTextFile(`${tmpDir}/signature`, sshSignatureBlob);
+    const dataPath = `${tmpDir}/data`;
+    await Deno.writeTextFile(dataPath, dataThatWasSigned);
 
-  private constructor(data: OIDCTokenData) {
-    Object.assign(this, data);
+    const dataBytes = await Deno.readFile(dataPath);
+    const child = new Deno.Command("ssh-keygen", {
+      args: [
+        "-Y",
+        "check-novalidate",
+        "-n",
+        "prove-sshd",
+        "-f",
+        "allowed_signing_key.pub",
+        "-s",
+        "signature",
+      ],
+      cwd: tmpDir,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const writer = child.stdin.getWriter();
+    await writer.write(dataBytes);
+    await writer.close();
+    const { code } = await child.output();
+    return code === 0;
+  } finally {
+    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
+  }
+}
+
+export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
+  const getIssuerUrl = opts.getIssuerUrl;
+  const getDroplet: DropletGetter = opts.getDroplet ?? (() => undefined);
+  const plcDirectoryUrl = opts.plcDirectoryUrl ?? "https://plc.directory";
+  const log = opts.log ?? noopLogger;
+  const jwkStore = opts.store ?? createMemoryJwkStore();
+  const nonceStore = opts.nonceStore ?? createMemoryNonceStore();
+  const trustedIssuerUrls = [...(opts.trustedIssuerUrls ?? [])];
+  const defaultTtlSeconds = opts.defaultTtlSeconds ?? DEFAULT_TOKEN_TTL_SECONDS;
+  const remoteJwks = new Map<string, ReturnType<typeof jose.createRemoteJWKSet>>();
+
+  let signingKey: Promise<CryptoKeyPair> | null = null;
+  let publicJwk: Promise<jose.JWK> | null = null;
+
+  async function loadOrGenerateSigningKey(): Promise<CryptoKeyPair> {
+    const issuer = getIssuerUrl();
+    const storedPem = await jwkStore.getJwkPem(issuer);
+    if (storedPem) return await signingKeyFromPem(storedPem);
+    const generated = await crypto.subtle.generateKey(
+      { name: "RSASSA-PKCS1-v1_5", modulusLength: 4096, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+      true,
+      ["sign", "verify"],
+    );
+    const pem = await jose.exportPKCS8(generated.privateKey);
+    await jwkStore.saveJwkPem(issuer, pem);
+    return generated;
   }
 
-  static async create(
+  function getSigningKey(): Promise<CryptoKeyPair> {
+    signingKey ??= loadOrGenerateSigningKey().catch((err) => {
+      signingKey = null;
+      throw err;
+    });
+    return signingKey;
+  }
+
+  async function derivePublicJwk(): Promise<jose.JWK> {
+    const keys = await getSigningKey();
+    const jwk = await jose.exportJWK(keys.publicKey);
+    jwk.use = "sig";
+    jwk.alg = "RS256";
+    jwk.kid = await jose.calculateJwkThumbprint(jwk);
+    return jwk;
+  }
+
+  function getPublicJwk(): Promise<jose.JWK> {
+    publicJwk ??= derivePublicJwk().catch((err) => {
+      publicJwk = null;
+      throw err;
+    });
+    return publicJwk;
+  }
+
+  function getRemoteJwks(jwksUri: string) {
+    let jwks = remoteJwks.get(jwksUri);
+    if (!jwks) {
+      jwks = jose.createRemoteJWKSet(new URL(jwksUri));
+      remoteJwks.set(jwksUri, jwks);
+    }
+    return jwks;
+  }
+
+  function requireIssuerBaseUrl(): string {
+    let issuerUrl: string;
+    try {
+      issuerUrl = getIssuerUrl();
+    } catch (err) {
+      throw new Error(`refusing provisioning: no issuer base URL (${err instanceof Error ? err.message : String(err)})`);
+    }
+    let protocol = "";
+    try {
+      protocol = new URL(issuerUrl).protocol;
+    } catch {
+      protocol = "";
+    }
+    if (protocol !== "https:" && protocol !== "http:") {
+      throw new Error(`refusing provisioning: issuer base URL is not an http(s) URL: '${issuerUrl}'`);
+    }
+    return issuerUrl;
+  }
+
+  async function createToken(
     actx: string,
     claims: Record<string, unknown>,
     api = "DigitalOcean",
-  ): Promise<OIDCToken> {
+  ): Promise<OIDCTokenData> {
     const keys = await getSigningKey();
     const jwk = await getPublicJwk();
-    const issuerUrl = _getIssuerUrl();
+    const issuerUrl = getIssuerUrl();
     let audience = `api://${api}?actx=${actx}`;
 
     const sub = claims["sub"] as string | undefined;
@@ -166,12 +289,8 @@ export class OIDCToken implements OIDCTokenData {
     const payload = { ...claims };
     delete payload["ttl"];
 
-    let expTime: number;
-    if (typeof claims["ttl"] === "number") {
-      expTime = Math.floor(Date.now() / 1000) + (claims["ttl"] as number);
-    } else {
-      expTime = Math.floor(Date.now() / 1000) + _defaultTtlSeconds;
-    }
+    const ttl = typeof claims["ttl"] === "number" ? claims["ttl"] as number : defaultTtlSeconds;
+    const expTime = Math.floor(Date.now() / 1000) + ttl;
 
     if (typeof claims["aud"] === "string") {
       audience = claims["aud"];
@@ -185,35 +304,31 @@ export class OIDCToken implements OIDCTokenData {
       .setExpirationTime(expTime)
       .sign(keys.privateKey);
 
-    return new OIDCToken({
+    return {
       actx,
       api,
       aud: audience,
       sub: sub!,
       claims: { ...payload, iss: issuerUrl, aud: audience },
       asString: token,
-    });
+    };
   }
 
-  static async validate(
-    token: string,
-    getIssuers?: (api: string, actx: string) => Promise<string[]> | string[],
-  ): Promise<OIDCToken> {
+  async function validateToken(token: string, getIssuers?: IssuersForAudience): Promise<OIDCTokenData> {
     if (!token || token === "0") throw new UnauthorizedException("Unable to authenticate you, no token");
     if (token.split(".").length !== 3) throw new UnauthorizedException("Invalid token");
 
-    const issuerUrl = _getIssuerUrl();
+    const issuerUrl = getIssuerUrl();
 
     const unverified = jose.decodeJwt(token);
     const rawAud = Array.isArray(unverified.aud) ? unverified.aud[0] : unverified.aud as string;
     const { actx, api } = parseAudience(rawAud ?? "");
     const expectedAud = `api://${api}?actx=${actx}`;
 
-    const ownIssuers = [issuerUrl];
     const extraIssuers = (getIssuers ? await getIssuers(api, actx) : []).filter((issuer) =>
-      _trustedIssuerUrls.includes(issuer)
+      trustedIssuerUrls.includes(issuer)
     );
-    const issuers = [...new Set([...ownIssuers, ...extraIssuers])];
+    const issuers = [...new Set([issuerUrl, ...extraIssuers])];
 
     let lastErr: Error = new Error("no issuers");
     for (const issuer of issuers) {
@@ -223,7 +338,9 @@ export class OIDCToken implements OIDCTokenData {
           const keys = await getSigningKey();
           jwks = keys.publicKey as unknown as jose.JWTVerifyGetKey;
         } else {
-          const openidConfig = await fetch(`${issuer}/.well-known/openid-configuration`).then((r) => r.json()) as { jwks_uri: string };
+          const openidConfig = await fetch(`${issuer}/.well-known/openid-configuration`).then((r) => r.json()) as {
+            jwks_uri: string;
+          };
           jwks = getRemoteJwks(openidConfig.jwks_uri);
         }
 
@@ -232,77 +349,98 @@ export class OIDCToken implements OIDCTokenData {
           audience: expectedAud,
         });
 
-        return new OIDCToken({
+        return {
           actx,
           api,
           aud: expectedAud,
           sub: payload.sub!,
           claims: payload as Record<string, unknown>,
           asString: token,
-        });
+        };
       } catch (e) {
         lastErr = e as Error;
       }
     }
     throw new UnauthorizedException(`OIDC token failed validation: ${lastErr.message}`);
   }
-}
 
-function createMemoryNonceStore(): NonceStore {
-  const m = new Map<string, string>();
-  return {
-    createProvisioningNonce: (nonce, dropletId) => { m.set(nonce, dropletId); },
-    getProvisioningNonceDropletId: (nonce) => {
-      const id = m.get(nonce);
-      if (id === undefined) throw new Error(`Nonce ${nonce} not found`);
-      m.delete(nonce);
-      return id;
-    },
-  };
-}
+  async function raiseIfUnauthorized(
+    service: string,
+    scope: string,
+    token: string,
+    path: string,
+    method: string,
+  ): Promise<AuthToken> {
+    const unverifiedPayload = (() => {
+      try {
+        const [, payloadB64] = token.split(".");
+        return JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
+      } catch {
+        return {};
+      }
+    })();
 
-let _nonceStore: NonceStore = createMemoryNonceStore();
+    const rawAud = Array.isArray(unverifiedPayload.aud)
+      ? unverifiedPayload.aud[0]
+      : unverifiedPayload.aud as string ?? "";
 
-export function configureProvisioning(cfg: { nonceStore?: NonceStore }): void {
-  if (cfg.nonceStore) _nonceStore = cfg.nonceStore;
-}
+    const caller = parseAudience(rawAud);
+    log("info", "rbac gate", { actx: caller.actx, api: caller.api, service, scope, path, method, rawAud });
 
-const DEFAULT_NONCE_LEN = 64;
-const DEFAULT_TTL_SECONDS = 60 * 15;
+    const signatureVerifiedToken = await validateToken(token, () => trustedIssuerUrls);
 
-export class ProvisioningData {
-  nonce: string;
-  token: OIDCToken;
-  userData: string;
+    const actx = signatureVerifiedToken.actx.includes(".")
+      ? "did:web:" + signatureVerifiedToken.actx
+      : "did:plc:" + signatureVerifiedToken.actx;
 
-  private constructor(init: { nonce: string; token: OIDCToken; userData: string }) {
-    this.nonce = init.nonce;
-    this.token = init.token;
-    this.userData = init.userData;
+    let rbac = null;
+    let issuers: string[] = [];
+    let pdsURL = "";
+    try {
+      pdsURL = await resolvePDS(actx, plcDirectoryUrl);
+      log("info", "rbac gate resolved pds", { actx, pdsURL });
+      rbac = await getRBACRecord(pdsURL, actx, service, scope, log);
+      issuers = collectIssuers(rbac);
+      log("info", "rbac gate issuers", { actx, issuers });
+    } catch (err) {
+      log("warn", "rbac gate resolve failed", { actx, service, scope, pdsURL, error: String(err) });
+      throw new UnauthorizedException(
+        `failed to resolve RBAC for actx=${actx}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    if (issuers.length > 0) {
+      await validateToken(token, () => issuers.filter((issuer) => trustedIssuerUrls.includes(issuer)));
+    }
+
+    log("info", "rbac gate token validated", { actx, sub: signatureVerifiedToken.sub });
+
+    if (rbac) {
+      checkRBACPolicy(rbac, signatureVerifiedToken.sub, path, method);
+      log("info", "rbac gate authorized", { actx, sub: signatureVerifiedToken.sub, path, method });
+    }
+
+    return signatureVerifiedToken as AuthToken;
   }
 
-  static async create(
+  async function createProvisioningData(
     teamUuid: string,
-    userData: string | null,
-    issuerUrl: string,
-    opts: { ttl?: number; nonceLen?: number } = {},
+    baseUserData: string | null,
+    provisioningOpts: { ttl?: number; nonceLen?: number } = {},
   ): Promise<ProvisioningData> {
-    if (userData === null) userData = "";
-    const nonceLen = opts.nonceLen ?? DEFAULT_NONCE_LEN;
-    const ttl = opts.ttl ?? DEFAULT_TTL_SECONDS;
+    const issuerUrl = requireIssuerBaseUrl();
+    const userData = baseUserData ?? "";
+    const nonceLen = provisioningOpts.nonceLen ?? DEFAULT_NONCE_LEN;
+    const ttl = provisioningOpts.ttl ?? DEFAULT_PROVISIONING_TTL_SECONDS;
 
     const nonceBytes = crypto.getRandomValues(new Uint8Array(nonceLen / 2));
     const nonce = Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 
-    const token = await OIDCToken.create(teamUuid, {
+    const token = await createToken(teamUuid, {
       nonce,
       sub: `actx:${teamUuid}:role:provisioning:nonce:${nonce}`,
       ttl,
     });
-
-    // Key-only root login; password auth disabled to prevent DO's
-    // expired-root-password PAM prompt ("Password change required but
-    // no TTY available") from blocking non-interactive SSH.
 
     const provisionScriptContent = `#!/usr/bin/env bash
 set -euo pipefail
@@ -355,7 +493,7 @@ done
 TOKEN=\$(cat /root/secrets/digitalocean.com/serviceaccount/token 2>/dev/null)
 BASE_URL=\$(cat /root/secrets/digitalocean.com/serviceaccount/base_url 2>/dev/null)
 [ -z "\${TOKEN}" ] && { echo "no OIDC token, skipping onNetwork"; exit 0; }
-[ -z "\${BASE_URL}" ] && BASE_URL="https://xrpc.fedproxy.com"
+[ -z "\${BASE_URL}" ] && { echo "guest-onnetwork: no issuer base_url, not reporting"; exit 1; }
 
 ACCEPT_URI=\$(jq -r '.accept.uri // empty' "\${ACCEPT_JSON}" 2>/dev/null)
 ACCEPT_CID=\$(jq -r '.accept.cid // empty' "\${ACCEPT_JSON}" 2>/dev/null)
@@ -402,9 +540,6 @@ StandardError=journal+console
 WantedBy=multi-user.target
 `;
 
-    // Compose via the shared cloud-init-common buildUserData: the base
-    // user_data patched with the provisioning exchange. runcmdPrepend preserves
-    // the exact unshift order of the hand-rolled merge it replaces.
     const finalUserData = buildUserData({
       base: userData,
       modules: [() => ({
@@ -417,13 +552,7 @@ WantedBy=multi-user.target
           { path: "/etc/systemd/system/provisioning-token.service", permissions: "0644", content: provisionUnitContent },
         ],
         runcmdPrepend: [
-          // cloud-init write_files creates /root/.ssh with 0755; SSH requires
-          // 0700 for publickey auth. Fix before sshd starts checking keys.
           "[ -d /root/.ssh ] && chmod 700 /root/.ssh || true",
-          // DO sets root password expired — PAM blocks even key-based SSH.
-          // Direct shadow edit: clear password field (no password = no expiry)
-          // and set max days to 99999 (disabled). More reliable than passwd/chage
-          // which may need PAM/TTY or be unavailable in cloud-init's minimal env.
           "sed -i 's/^root:[^:]*:[^:]*:[^:]*:[^:]*:/root::19000:0:99999:/' /etc/shadow || true",
           "systemctl daemon-reload",
           "systemctl enable provisioning-token.service",
@@ -434,186 +563,52 @@ WantedBy=multi-user.target
       })],
     });
 
-    return new ProvisioningData({ nonce, token, userData: finalUserData });
+    return {
+      nonce,
+      token,
+      userData: finalUserData,
+      associateWithDroplet(dropletId: string): void {
+        if (!dropletId) return;
+        nonceStore.createProvisioningNonce(nonce, dropletId);
+      },
+    };
   }
 
-  associateWithDroplet(dropletId: string): void {
-    if (!dropletId) return;
-    _nonceStore.createProvisioningNonce(this.nonce, dropletId);
-  }
-}
+  async function provisioningValidate(
+    token: string,
+    signature: string,
+    port: number,
+  ): Promise<{ oidcToken: OIDCTokenData; droplet: Record<string, unknown> } | null> {
+    const oidcToken = await validateToken(token);
+    const nonce = oidcToken.claims["nonce"] as string | undefined;
+    if (!nonce) throw new Error("provisioning token missing nonce claim");
 
-async function getPublicKeyFromSshd(
-  publicIpv4: string,
-  port: number,
-  containerName?: string,
-): Promise<string> {
-  const containerCli = (() => { try { Deno.statSync("/usr/local/bin/container"); return "/usr/local/bin/container"; } catch { return "docker"; } })();
-  const deadline = Date.now() + 300_000;
-  while (Date.now() < deadline) {
-    try {
-      let cmd: Deno.Command;
-      if (containerName) {
-        cmd = new Deno.Command(containerCli, {
-          args: ["exec", containerName, "ssh-keyscan", "-t", "ed25519", "-p", String(port), "127.0.0.1"],
-          stdout: "piped", stderr: "piped",
-        });
-      } else {
-        cmd = new Deno.Command("ssh-keyscan", {
-          args: ["-t", "ed25519", "-p", String(port), publicIpv4],
-          stdout: "piped", stderr: "piped",
-        });
-      }
-      const { code, stdout } = await cmd.output();
-      const out = new TextDecoder().decode(stdout).trim();
+    const dropletId = await nonceStore.getProvisioningNonceDropletId(nonce);
+    const droplet = await getDroplet(dropletId);
+    if (!droplet) throw new Error(`droplet ${dropletId} not found`);
 
-      if (code === 0) {
-        const line = out.split("\n").find((l) => l.includes("ed25519"));
-        if (line) {
-          const parts = line.split(" ");
-          return parts.slice(1).join(" ");
-        }
-      }
-    } catch {
-      /* retry */
-    }
-    await new Promise((r) => setTimeout(r, 2_000));
-  }
-  throw new Error(`ssh-keyscan timed out for ${publicIpv4}:${port}`);
-}
+    const networks = droplet["networks"] as { v4: { ip_address: string; type: string }[] } | undefined;
+    const publicIpv4 = networks?.v4.find((n) => n.type === "public")?.ip_address;
+    if (!publicIpv4) throw new Error(`no public IPv4 for droplet ${dropletId}`);
 
-async function validateSshSignature(
-  publicKeyOpensshString: string,
-  sshSignatureBlob: string,
-  dataThatWasSigned: string,
-): Promise<boolean> {
-  const tmpDir = await Deno.makeTempDir();
-  try {
-    await Deno.writeTextFile(`${tmpDir}/allowed_signing_key.pub`, `* ${publicKeyOpensshString}`);
-    await Deno.writeTextFile(`${tmpDir}/signature`, sshSignatureBlob);
-    const dataPath = `${tmpDir}/data`;
-    await Deno.writeTextFile(dataPath, dataThatWasSigned);
+    const containerName = droplet["containerName"] as string | undefined;
+    const publicKey = await getPublicKeyFromSshd(publicIpv4, port, containerName);
 
-    const dataBytes = await Deno.readFile(dataPath);
-    const child = new Deno.Command("ssh-keygen", {
-      args: [
-        "-Y", "check-novalidate",
-        "-n", "prove-sshd",
-        "-f", "allowed_signing_key.pub",
-        "-s", "signature",
-      ],
-      cwd: tmpDir,
-      stdin: "piped",
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    const writer = child.stdin.getWriter();
-    await writer.write(dataBytes);
-    await writer.close();
-    const { code } = await child.output();
-    return code === 0;
-  } finally {
-    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
-  }
-}
-
-async function provisioningValidate(
-  token: string,
-  signature: string,
-  port: number,
-  dropletGetter: (id: string) => Record<string, unknown> | Promise<Record<string, unknown> | undefined> | undefined,
-): Promise<{ oidcToken: OIDCToken; droplet: Record<string, unknown> } | null> {
-  const oidcToken = await OIDCToken.validate(token);
-  const nonce = oidcToken.claims["nonce"] as string | undefined;
-  if (!nonce) throw new Error("provisioning token missing nonce claim");
-
-  const dropletId = _nonceStore.getProvisioningNonceDropletId(nonce);
-  const droplet = await dropletGetter(dropletId);
-  if (!droplet) throw new Error(`droplet ${dropletId} not found`);
-
-  const networks = droplet["networks"] as { v4: { ip_address: string; type: string }[] } | undefined;
-  const publicIpv4 = networks?.v4.find((n) => n.type === "public")?.ip_address;
-  if (!publicIpv4) throw new Error(`no public IPv4 for droplet ${dropletId}`);
-
-  const containerName = droplet["containerName"] as string | undefined;
-  const publicKey = await getPublicKeyFromSshd(publicIpv4, port, containerName);
-
-  const valid = await validateSshSignature(publicKey, signature, token);
-  if (!valid) return null;
-  return { oidcToken, droplet };
-}
-
-export async function raiseIfUnauthorized(
-  service: string,
-  scope: string,
-  token: string,
-  path: string,
-  method: string,
-  plcDirectoryUrl = "https://plc.directory",
-  log: (level: string, msg: string, meta?: Record<string, unknown>) => void = () => {},
-): Promise<AuthToken> {
-  const unverifiedPayload = (() => {
-    try {
-      const [, payloadB64] = token.split(".");
-      return JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/")));
-    } catch {
-      return {};
-    }
-  })();
-
-  const rawAud = Array.isArray(unverifiedPayload.aud)
-    ? unverifiedPayload.aud[0]
-    : unverifiedPayload.aud as string ?? "";
-
-  const caller = parseAudience(rawAud);
-  log("info", "rbac gate", { actx: caller.actx, api: caller.api, service, scope, path, method, rawAud });
-
-  // Signature first, and against configuration only. Everything below resolves a
-  // URL out of the caller's aud, so it may run only on a token that verified.
-  const signatureVerifiedToken = await OIDCToken.validate(token, async () => _trustedIssuerUrls);
-
-  const actx = signatureVerifiedToken.actx.includes(".")
-    ? "did:web:" + signatureVerifiedToken.actx
-    : "did:plc:" + signatureVerifiedToken.actx;
-
-  let rbac = null;
-  let issuers: string[] = [];
-  let pdsURL = "";
-  try {
-    pdsURL = await resolvePDS(actx, plcDirectoryUrl);
-    log("info", "rbac gate resolved pds", { actx, pdsURL });
-    rbac = await getRBACRecord(pdsURL, actx, service, scope, log);
-    issuers = collectIssuers(rbac);
-    log("info", "rbac gate issuers", { actx, issuers });
-  } catch (err) {
-    log("warn", "rbac gate resolve failed", { actx, service, scope, pdsURL, error: String(err) });
-    throw new UnauthorizedException(
-      `failed to resolve RBAC for actx=${actx}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    const valid = await validateSshSignature(publicKey, signature, token);
+    if (!valid) return null;
+    return { oidcToken, droplet };
   }
 
-  // The record's issuers narrow the trusted set for this actx; they never add to it.
-  if (issuers.length > 0) {
-    await OIDCToken.validate(token, async () =>
-      issuers.filter((issuer) => _trustedIssuerUrls.includes(issuer)));
-  }
-
-  log("info", "rbac gate token validated", { actx, sub: signatureVerifiedToken.sub });
-
-  if (rbac) {
-    checkRBACPolicy(rbac, signatureVerifiedToken.sub, path, method);
-    log("info", "rbac gate authorized", { actx, sub: signatureVerifiedToken.sub, path, method });
-  }
-
-  return signatureVerifiedToken as AuthToken;
-}
-
-export function createOidcIssuer(opts: OidcIssuerOptions & TrustedIssuerOptions): OidcIssuer {
-  const { getIssuerUrl, getDroplet } = opts;
-  const plcDirectoryUrl = opts.plcDirectoryUrl ?? "https://plc.directory";
-  const log = opts.log ?? noopLogger;
-
-  configureOidc({ getIssuerUrl, trustedIssuerUrls: opts.trustedIssuerUrls });
+  const provisioningEnricher: OidcProvisioningEnricher = {
+    async enrich(userData: string | null, teamUuid: string) {
+      const pd = await createProvisioningData(teamUuid, userData);
+      return {
+        userData: pd.userData,
+        nonce: pd.nonce,
+        associateWithDroplet: (dropletId: string) => pd.associateWithDroplet(dropletId),
+      };
+    },
+  };
 
   const app = new Hono<{ Variables: { authToken: AuthToken; actx: string } }>();
 
@@ -651,8 +646,6 @@ export function createOidcIssuer(opts: OidcIssuerOptions & TrustedIssuerOptions)
         token,
         "/v1/oidc/issue",
         c.req.method,
-        plcDirectoryUrl,
-        log,
       );
       c.set("authToken", authToken);
       c.set("actx", authToken.actx);
@@ -675,7 +668,7 @@ export function createOidcIssuer(opts: OidcIssuerOptions & TrustedIssuerOptions)
         return c.json({ id: "unauthorized", message: `sub must be scoped to actx:${actx}` }, 401);
       }
 
-      const token = await OIDCToken.create(actx, { ...body, sub });
+      const token = await createToken(actx, { ...body, sub });
       log("info", "issue token", { actx, sub });
       return c.json({ token: token.asString });
     } catch (err) {
@@ -689,20 +682,18 @@ export function createOidcIssuer(opts: OidcIssuerOptions & TrustedIssuerOptions)
       const body = await c.req.json<{ sig: string; port: number }>();
       const token = extractBearer(c.req.header("Authorization"));
 
-      const provToken = await OIDCToken.validate(token);
+      const provToken = await validateToken(token);
       const actx = provToken.actx;
       log("info", "prove start", { actx, sub: provToken.sub, port: body.port });
 
-      const result = await provisioningValidate(token, body.sig, body.port, async (id) => {
-        return await getDroplet(id);
-      });
+      const result = await provisioningValidate(token, body.sig, body.port);
       if (!result) {
         log("warn", "prove rejected", { actx, reason: "provisioningValidate returned null" });
         return c.json({ valid: false });
       }
 
       const { oidcToken, droplet } = result;
-      const dropletTags = ((droplet["tags"] as string[]) ?? []);
+      const dropletTags = (droplet["tags"] as string[]) ?? [];
       const subject = [
         `actx:${oidcToken.actx}`,
         ...dropletTags
@@ -710,7 +701,7 @@ export function createOidcIssuer(opts: OidcIssuerOptions & TrustedIssuerOptions)
           .map((t) => t.split(":")[1] + ":" + t.split(":")[2]),
       ].join(":");
 
-      const issued = await OIDCToken.create(oidcToken.actx, {
+      const issued = await createToken(oidcToken.actx, {
         sub: subject,
         droplet_id: droplet["id"],
       });
@@ -722,23 +713,15 @@ export function createOidcIssuer(opts: OidcIssuerOptions & TrustedIssuerOptions)
     }
   });
 
-  return { app };
-}
-
-export function createOidcProvisioningEnricher(
-  getIssuerUrl: () => string,
-): OidcProvisioningEnricher {
   return {
-    async enrich(userData: string, teamUuid: string, issuerUrl: string) {
-      configureOidc({ getIssuerUrl });
-      const pd = await ProvisioningData.create(teamUuid, userData, issuerUrl);
-      return {
-        userData: pd.userData,
-        nonce: pd.nonce,
-        associateWithDroplet(dropletId: string): void {
-          pd.associateWithDroplet(dropletId);
-        },
-      };
-    },
+    app,
+    getIssuerUrl,
+    getSigningKey,
+    getPublicJwk,
+    createToken,
+    validateToken,
+    raiseIfUnauthorized,
+    createProvisioningData,
+    provisioningEnricher,
   };
 }

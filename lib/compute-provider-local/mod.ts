@@ -13,8 +13,7 @@ import type {
 } from "@publicdomainrelay/compute-provider-abc";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
-import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
-import { createOidcIssuer, OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
 import { createPackageRegistryFactory } from "@publicdomainrelay/hono-factory-package-registry";
 import { Hono } from "@hono/hono";
 import { createLocalFsStore } from "@publicdomainrelay/package-store-local-fs";
@@ -41,7 +40,9 @@ export interface ComputeProviderLocalCtx extends ComputeProviderCtx {
   containerImage?: string;
   cacheDir?: string;
   containerBackend?: ContainerBackend;
-  oidcProvisioner?: OidcProvisioningEnricher;
+  oidcProvisioning?: boolean;
+  oidcJwkStore?: JwkStore;
+  oidcNonceStore?: NonceStore;
   rbacProvisioner?: RbacProvisioner;
   /** Dispatcher host:port (e.g. localhost:8080) — used to rewrite *.localhost
    * URLs for guest containers that can't resolve localhost. */
@@ -576,10 +577,17 @@ interface LocalDroplet {
 }
 
 export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
-  const { atproto, getIssuerUrl, logger, oidcProvisioner, rbacProvisioner, serve } = ctx;
+  const { atproto, getIssuerUrl, logger, rbacProvisioner, serve } = ctx;
   const log: Logger = (level, message, meta) => {
     logger[level as "info" | "warn" | "error" | "debug"]?.(message, meta);
   };
+  const oidcIssuer = createOidcIssuer({
+    getIssuerUrl,
+    getDroplet: (id: string) => droplets.get(id) as Record<string, unknown> | undefined,
+    store: ctx.oidcJwkStore,
+    nonceStore: ctx.oidcNonceStore,
+    log,
+  });
   const backend: ContainerBackend = ctx.containerBackend ??
     (Deno.build.os === "darwin" ? createContainerBackend() : createDockerBackend());
   const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
@@ -600,14 +608,6 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
 
   serve.onConnected(async (ingressRef) => {
     const serviceUrl = didWebToHttps(ingressRef);
-    const oidcIssuer = createOidcIssuer({
-      getIssuerUrl,
-      getDroplet: (id: string) => droplets.get(id) as Record<string, unknown> | undefined,
-      serviceUrl,
-      log: (level: string, msg: string, extra?: Record<string, unknown>) => {
-        logger[level as "info" | "warn" | "error" | "debug"]?.(msg, extra);
-      },
-    });
     serve.app.route("/", oidcIssuer.app as never);
     logger.info("local oidc issuer mounted", { serviceUrl });
 
@@ -639,7 +639,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       const authHeader = c.req.header("Authorization");
       const token = (authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null);
       if (!token) return c.json({ error: "AuthenticationRequired" }, 401);
-      const validated = await OIDCToken.validate(token).catch(() => null);
+      const validated = await oidcIssuer.validateToken(token).catch(() => null);
       if (!validated) return c.json({ error: "InvalidToken" }, 401);
       let body: Record<string, unknown>;
       try { body = await c.req.json(); } catch {
@@ -747,8 +747,8 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       issuerUrl: getIssuerUrl(),
       containerName,
     });
-    const enriched = oidcProvisioner
-      ? await oidcProvisioner.enrich(user_data, agentDidPlc, getIssuerUrl())
+    const enriched = ctx.oidcProvisioning
+      ? await oidcIssuer.provisioningEnricher.enrich(user_data, agentDidPlc)
       : { userData: user_data, nonce: "", associateWithDroplet: () => {} };
     let enrichedUserData = enriched.userData;
     // ── JSR_URL injection ────────────────────────────────────────────────
@@ -950,6 +950,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     getDroplet: (id: string): Record<string, unknown> | undefined =>
       droplets.get(id) as Record<string, unknown> | undefined,
     ensureImage,
+    oidcIssuer,
   };
 }
 

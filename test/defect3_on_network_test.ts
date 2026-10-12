@@ -1,6 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
 import { Hono } from "@hono/hono";
-import { ProvisioningData } from "@publicdomainrelay/oidc-issuer-hono";
 import { createComputeProviderLocal, type ComputeProviderLocalCtx } from "@publicdomainrelay/compute-provider-local";
 import type { ServeHandle } from "@publicdomainrelay/serve";
 
@@ -38,7 +37,7 @@ Deno.test("defect3: /v1/on-network must verify the token signature, not just exp
     jsrBaseDir: new URL("../../..", import.meta.url).pathname,
   } as unknown as ComputeProviderLocalCtx;
 
-  createComputeProviderLocal(ctx);
+  const { oidcIssuer } = createComputeProviderLocal(ctx);
   await callbacks[0]("did:web:onnetwork.test");
 
   const post = (token: string) =>
@@ -51,7 +50,7 @@ Deno.test("defect3: /v1/on-network must verify the token signature, not just exp
   const forged = await post(forgedToken());
   console.log("[defect3] forged token ->", forged.status, JSON.stringify(await forged.json()));
 
-  const provisioning = await ProvisioningData.create("defect3team", null, ISSUER);
+  const provisioning = await oidcIssuer.createProvisioningData("defect3team", null);
   const legit = await post(provisioning.token.asString);
   console.log("[defect3] issuer-minted token ->", legit.status, JSON.stringify(await legit.json()));
 

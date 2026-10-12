@@ -1,8 +1,6 @@
 import { assertEquals } from "@std/assert";
 import {
   createOidcIssuer,
-  ProvisioningData,
-  OIDCToken,
 } from "@publicdomainrelay/oidc-issuer-hono";
 
 const SSH_KEYGEN_RETRIES = 5;
@@ -98,11 +96,11 @@ Deno.test("[integration] OIDC workload identity provisioning flow", async () => 
     };
 
     // ── 5. Create OIDC issuer + start server ────────────────────────
-    const { app } = createOidcIssuer({
+    const oidcIssuer = createOidcIssuer({
       getIssuerUrl: () => issuerUrl,
       getDroplet,
-      serviceUrl: issuerUrl,
     });
+    const { app } = oidcIssuer;
 
     const ac = new AbortController();
     const server = Deno.serve(
@@ -116,11 +114,7 @@ Deno.test("[integration] OIDC workload identity provisioning flow", async () => 
 
     try {
       // ── 6. Create provisioning data ───────────────────────────────
-      const provisioningData = await ProvisioningData.create(
-        teamUuid,
-        null,
-        issuerUrl,
-      );
+      const provisioningData = await oidcIssuer.createProvisioningData(teamUuid, null);
       provisioningData.associateWithDroplet(dropletId);
 
       // ── 7. SSH-sign the provisioning token ────────────────────────
@@ -167,7 +161,7 @@ Deno.test("[integration] OIDC workload identity provisioning flow", async () => 
       }
 
       // ── 9. Validate the returned JWT ──────────────────────────────
-      const validated = await OIDCToken.validate(finalToken);
+      const validated = await oidcIssuer.validateToken(finalToken);
       assertEquals(validated.actx, teamUuid);
 
       // ── 10. Write to secrets path ─────────────────────────────────
@@ -180,7 +174,7 @@ Deno.test("[integration] OIDC workload identity provisioning flow", async () => 
       const writtenToken = await Deno.readTextFile(`${secretsDir}/token`);
       assertEquals(writtenToken, finalToken);
 
-      const reValidated = await OIDCToken.validate(writtenToken);
+      const reValidated = await oidcIssuer.validateToken(writtenToken);
       assertEquals(reValidated.actx, teamUuid);
     } finally {
       ac.abort();

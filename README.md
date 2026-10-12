@@ -88,7 +88,7 @@ OIDC endpoints (local provider only):
 ## How local provisioning works
 
 1. POST `/v2/droplets` hits factory
-2. `ProvisioningData.create()` mints nonce + short-lived JWT + injects cloud-init
+2. `issuer.createProvisioningData()` mints nonce + short-lived JWT + injects cloud-init
    runcmd scripts (provisioning-token.sh + systemd unit)
 3. `spawnVM()` fires: write user-data, `docker run -d` with systemctl-shim mounted
 4. Container boots: systemctl-shim starts sshd, runs cloud-init
@@ -114,7 +114,7 @@ lib/abc/compute-provider          ComputeProvider interface, VM, DropletSpec
 lib/compute-provider-local        Docker/QEMU runner, systemctl-shim
 lib/compute-provider-digitalocean DO API provider
 lib/rbac-atproto                  atproto record RBAC (com.fedproxy.rbac)
-lib/oidc-issuer                   OIDC Hono app, OIDCToken, ProvisioningData
+lib/oidc-issuer                   createOidcIssuer: per-instance key, JWKS, nonces, provisioning
 lib/hono-factory-compute-provider-local      DO-compatible droplets API (local backend)
 lib/hono-factory-compute-provider-digitalocean  DO-compatible droplets API (proxy backend)
 hono-compute-provider             CLI entrypoint, cli-args-env.json

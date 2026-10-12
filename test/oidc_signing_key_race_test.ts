@@ -1,9 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
-import {
-  createOidcIssuer,
-  createOidcProvisioningEnricher,
-  OIDCToken,
-} from "@publicdomainrelay/oidc-issuer-hono";
+import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 
 function base64UrlDecode(part: string): Uint8Array<ArrayBuffer> {
   const b64 = part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "=");
@@ -12,15 +8,16 @@ function base64UrlDecode(part: string): Uint8Array<ArrayBuffer> {
 
 Deno.test("provisioning token minted while discovery is first served verifies against the published jwks", async () => {
   const issuer = "https://issuer.race.example";
-  const { app } = createOidcIssuer({
+  const oidcIssuer = createOidcIssuer({
     getIssuerUrl: () => issuer,
     getDroplet: () => Promise.resolve({ id: "d", tags: [], networks: { v4: [] } }),
   });
-  const enricher = createOidcProvisioningEnricher(() => issuer);
+  const { app } = oidcIssuer;
+  const enricher = oidcIssuer.provisioningEnricher;
 
   const [discovery, enriched] = await Promise.all([
     app.fetch(new Request(`${issuer}/.well-known/openid-configuration`)),
-    enricher.enrich("#cloud-config\n", "team", issuer),
+    enricher.enrich("#cloud-config\n", "team"),
   ]);
   await discovery.body?.cancel();
 
@@ -47,5 +44,5 @@ Deno.test("provisioning token minted while discovery is first served verifies ag
   );
   assert(verified, "provisioning token signature does not verify against the published jwks");
 
-  await OIDCToken.validate(token);
+  await oidcIssuer.validateToken(token);
 });
