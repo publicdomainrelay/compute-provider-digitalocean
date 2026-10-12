@@ -56,6 +56,7 @@ export interface Microvm {
   stop(workDir: string): Promise<void>;
   watch(container: string, onExit: (exit: MicrovmExit) => void): () => void;
   inspect?(container: string): Promise<MicrovmContainerState>;
+  guestNetExec?(name: string): string[] | undefined;
 
   /**
    * The address a guest of this microvm reaches THIS HOST at.

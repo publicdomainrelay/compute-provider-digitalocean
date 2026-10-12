@@ -609,9 +609,11 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
   const dropletForIssuer = (id: string): Record<string, unknown> | undefined => {
     const guest = guests.get(id);
     if (!guest) return undefined;
+    const guestNetExec = microvm.guestNetExec?.(guest.name);
     return {
       id,
-      containerName: guest.name,
+      containerName: guestNetExec ? undefined : guest.name,
+      guestNetExec,
       tags: [`oidc-sub:plc:${guest.requesterPlc}`, `oidc-sub:role:${guest.role}`],
       networks: { v4: [{ ip_address: guest.network.guestIp, type: "public" }] },
     };

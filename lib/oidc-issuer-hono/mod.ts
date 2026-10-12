@@ -107,6 +107,7 @@ async function getPublicKeyFromSshd(
   publicIpv4: string,
   port: number,
   containerName?: string,
+  guestNetExec?: string[],
 ): Promise<string> {
   const containerCli = (() => {
     try {
@@ -120,7 +121,13 @@ async function getPublicKeyFromSshd(
   while (Date.now() < deadline) {
     try {
       let cmd: Deno.Command;
-      if (containerName) {
+      if (guestNetExec && guestNetExec.length > 0) {
+        cmd = new Deno.Command(guestNetExec[0], {
+          args: [...guestNetExec.slice(1), "ssh-keyscan", "-t", "ed25519", "-p", String(port), publicIpv4],
+          stdout: "piped",
+          stderr: "piped",
+        });
+      } else if (containerName) {
         cmd = new Deno.Command(containerCli, {
           args: ["exec", containerName, "ssh-keyscan", "-t", "ed25519", "-p", String(port), "127.0.0.1"],
           stdout: "piped",
@@ -592,7 +599,8 @@ WantedBy=multi-user.target
     if (!publicIpv4) throw new Error(`no public IPv4 for droplet ${dropletId}`);
 
     const containerName = droplet["containerName"] as string | undefined;
-    const publicKey = await getPublicKeyFromSshd(publicIpv4, port, containerName);
+    const guestNetExec = droplet["guestNetExec"] as string[] | undefined;
+    const publicKey = await getPublicKeyFromSshd(publicIpv4, port, containerName, guestNetExec);
 
     const valid = await validateSshSignature(publicKey, signature, token);
     if (!valid) return null;

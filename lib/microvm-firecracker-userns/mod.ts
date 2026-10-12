@@ -86,6 +86,7 @@ export function createUsernsFirecrackerMicrovm(opts: UsernsMicrovmOptions): Micr
   const watchIntervalMs = opts.watchIntervalMs ?? DEFAULT_WATCH_INTERVAL_MS;
   const usedSlots = new Map<string, number>();
   const staged = new Map<string, Promise<string>>();
+  const netExec = new Map<string, string[]>();
 
   const identity = (async () => {
     const self = (await mustRun(["id", "-un"])).trim();
@@ -167,6 +168,21 @@ export function createUsernsFirecrackerMicrovm(opts: UsernsMicrovmOptions): Micr
     };
   }
 
+  async function childrenOf(pid: number): Promise<number[]> {
+    const raw = await Deno.readTextFile(`/proc/${pid}/task/${pid}/children`).catch(() => "");
+    return raw.trim().split(/\s+/).filter((p) => p !== "").map(Number);
+  }
+
+  async function descendantNamed(pid: number, comm: string): Promise<number | undefined> {
+    for (const child of await childrenOf(pid)) {
+      const name = (await Deno.readTextFile(`/proc/${child}/comm`).catch(() => "")).trim();
+      if (name === comm) return child;
+      const deeper = await descendantNamed(child, comm);
+      if (deeper !== undefined) return deeper;
+    }
+    return undefined;
+  }
+
   async function logTail(workDir: string): Promise<string> {
     return (await Deno.readTextFile(`${workDir}/nodeboot.log`).catch(() => "(no nodeboot.log)")).slice(-4000);
   }
@@ -238,10 +254,16 @@ export function createUsernsFirecrackerMicrovm(opts: UsernsMicrovmOptions): Micr
         const raw = await Deno.readTextFile(resultPath).catch(() => "");
         if (raw.trim()) {
           const parsed = JSON.parse(raw) as Record<string, unknown>;
+          const pastaPid = Number(parsed.pasta_pid);
+          const nsPid = (await childrenOf(pastaPid))[0];
+          const hostVmmPid = await descendantNamed(pastaPid, "firecracker");
+          if (nsPid !== undefined) {
+            netExec.set(spec.name, [...asAccount, "nsenter", "-t", String(nsPid), "-U", "-n", "--preserve-credentials"]);
+          }
           const result: MicrovmResult = {
             name: String(parsed.name),
             fingerprint: typeof parsed.fingerprint === "string" ? parsed.fingerprint : "",
-            vmmPid: Number(parsed.vmm_pid),
+            vmmPid: hostVmmPid ?? Number(parsed.vmm_pid),
             pastaPid: Number(parsed.pasta_pid),
             guestIp: String(parsed.guest_ip),
             socket: String(parsed.socket),
@@ -264,6 +286,9 @@ export function createUsernsFirecrackerMicrovm(opts: UsernsMicrovmOptions): Micr
       throw new Error(`guest ${spec.name} reported no result within ${bootTimeoutMs}ms:\n${await logTail(spec.workDir)}`);
     },
     inspect: unitState,
+    guestNetExec(name: string): string[] | undefined {
+      return netExec.get(name);
+    },
     hostAddressForGuest(): Promise<string> {
       return Promise.resolve(hostAddress);
     },
@@ -281,6 +306,7 @@ export function createUsernsFirecrackerMicrovm(opts: UsernsMicrovmOptions): Micr
         if (!(err instanceof Deno.errors.NotFound)) throw err;
       });
       usedSlots.delete(workDir);
+      netExec.delete(name);
       opts.logger?.info("microvm_work_dir_removed", { unit, workDir });
     },
     watch(container: string, onExit: (exit: MicrovmExit) => void): () => void {
