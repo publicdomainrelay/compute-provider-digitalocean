@@ -7,6 +7,8 @@ export const CONDITION_GUEST_REPORTED = "GuestReported";
 export const FINALIZER_COMPUTE_VM = "computevm.socialweb.computer/release";
 export const FIELD_MANAGER_COMPUTE_VM_CONTROLLER = "computevm-controller";
 export const FIELD_MANAGER_COMPUTE_VM_PROVIDER = "compute-provider-kcp";
+export const USER_DATA_SECRET_NAMESPACE = "default";
+export const USER_DATA_SECRET_KEY = "user-data";
 
 export const COMPUTE_VM_PHASES = ["Pending", "Preparing", "Booting", "Running", "Releasing", "Lost", "Failed"] as const;
 export type ComputeVMPhase = typeof COMPUTE_VM_PHASES[number];
