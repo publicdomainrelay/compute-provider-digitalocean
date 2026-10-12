@@ -12,12 +12,13 @@ import type {
   ComputeProvider,
   ComputeProviderCtx,
   DropletSpec,
+  GuestGone,
   ProvisionResult,
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
 import type { NodeImageStore } from "@publicdomainrelay/node-image-abc";
-import type { Microvm } from "@publicdomainrelay/microvm-firecracker";
+import type { Microvm, MicrovmExit } from "@publicdomainrelay/microvm-firecracker";
 import type { OidcProvisioningEnricher } from "@publicdomainrelay/oidc-issuer-abc";
 import { createOidcIssuer, OIDCToken } from "@publicdomainrelay/oidc-issuer-hono";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
@@ -111,6 +112,8 @@ const DEFAULT_RANGE_BASE = "172.30.0.0";
 const GUEST_SSH_PORT = 22;
 
 const GUEST_SSH_BIND = "0.0.0.0";
+
+const GUEST_NAME = /^fc-[0-9a-f]+-[0-9a-f]+$/;
 
 function octets(address: string): [number, number, number, number] {
   const parts = address.split(".").map((p) => Number(p));
@@ -562,6 +565,8 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
 
   const guests = new Map<string, Guest>();
   const rbacByProvider = new Map<string | number, StrongRef>();
+  const watches = new Map<string, () => void>();
+  const goneListeners = new Set<(gone: GuestGone) => void>();
   let nextIndex = 0;
   let imageDir: string | undefined;
   let imageRootfsMiB: number | undefined;
@@ -682,7 +687,9 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
         network,
       });
     } catch (cause) {
-      await Deno.remove(workDir, { recursive: true }).catch(() => {});
+      await microvm.stop(workDir).catch((err: unknown) =>
+        logger.warn("microvm_stop_failed", { name, error: String(err) })
+      );
       throw cause;
     }
     enriched.associateWithDroplet(name);
@@ -695,6 +702,14 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
       role: vm.role,
     };
     guests.set(name, guest);
+    watches.set(
+      name,
+      microvm.watch(booted.container, (exit) => {
+        guestExited(name, exit).catch((err: unknown) =>
+          logger.warn("microvm_exit_handling_failed", { name, error: String(err) })
+        );
+      }),
+    );
 
     let rbacRef: StrongRef | undefined;
     if (ctx.rbacProvisioner) {
@@ -731,21 +746,62 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     };
   }
 
+  async function releaseRbac(name: string): Promise<void> {
+    const rbacRef = rbacByProvider.get(name);
+    if (!rbacRef) return;
+    rbacByProvider.delete(name);
+    const { collection, rkey } = parseAtUri(rbacRef.uri);
+    await atproto.deleteRecord(collection, rkey).catch(() => {});
+  }
+
+  function workDirOf(name: string): string | undefined {
+    return guests.get(name)?.workDir ?? (GUEST_NAME.test(name) ? `${workRoot}/${name}` : undefined);
+  }
+
+  async function guestExited(name: string, exit: MicrovmExit): Promise<void> {
+    watches.delete(name);
+    const guest = guests.get(name);
+    if (!guest) return;
+    guests.delete(name);
+    logger.warn("microvm_exited", {
+      name,
+      reason: exit.reason,
+      exitCode: exit.exitCode,
+      logs: exit.logs.slice(-2000),
+    });
+    await releaseRbac(name);
+    await microvm.stop(guest.workDir).catch((err: unknown) =>
+      logger.warn("microvm_stop_failed", { name, error: String(err) })
+    );
+    const gone: GuestGone = { id: name, reason: `runner container ${exit.reason}`, exitCode: exit.exitCode };
+    for (const listener of goneListeners) {
+      try {
+        listener(gone);
+      } catch (err) {
+        logger.warn("guest_gone_listener_failed", { name, error: String(err) });
+      }
+    }
+  }
+
+  function onGuestGone(listener: (gone: GuestGone) => void): () => void {
+    goneListeners.add(listener);
+    return () => goneListeners.delete(listener);
+  }
+
   async function destroy(id: string | number): Promise<void> {
     const name = String(id);
-    const rbacRef = rbacByProvider.get(name);
-    if (rbacRef) {
-      const { collection, rkey } = parseAtUri(rbacRef.uri);
-      await atproto.deleteRecord(collection, rkey).catch(() => {});
-      rbacByProvider.delete(name);
+    watches.get(name)?.();
+    watches.delete(name);
+    await releaseRbac(name);
+    const workDir = workDirOf(name);
+    guests.delete(name);
+    if (!workDir) {
+      logger.warn("microvm_destroy_unknown", { name });
+      return;
     }
-    const guest = guests.get(name);
-    if (guest) {
-      await microvm.stop(guest.workDir).catch((err: unknown) =>
-        logger.warn("microvm_stop_failed", { name, error: String(err) })
-      );
-      guests.delete(name);
-    }
+    await microvm.stop(workDir).catch((err: unknown) =>
+      logger.warn("microvm_stop_failed", { name, error: String(err) })
+    );
   }
 
   function onConnected(app: Hono): void {
@@ -806,7 +862,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     logger.info("firecracker guest event routes mounted", {});
   }
 
-  return { ensureImage, createBidConfig, provision, destroy, onConnected, guests };
+  return { ensureImage, createBidConfig, provision, destroy, onConnected, onGuestGone, guests };
 }
 
 export function parseMemMiB(mem: unknown): number | undefined {
@@ -876,6 +932,7 @@ export function createFirecrackerComputeProvider(ctx: ComputeProviderFirecracker
       return result;
     },
     destroy: inner.destroy,
+    onGuestGone: inner.onGuestGone,
     createBidConfig: inner.createBidConfig,
     injectAcceptBundle: (userData: string, bundle: Record<string, unknown>) =>
       injectAcceptBundle(userData, bundle, ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM),

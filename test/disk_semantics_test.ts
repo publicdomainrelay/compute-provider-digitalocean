@@ -39,6 +39,7 @@ function aMicrovm(booted: MicrovmSpec[]): Microvm {
       });
     },
     stop: () => Promise.resolve(),
+    watch: () => () => {},
     hostAddressForGuest: () => Promise.resolve("172.17.0.1"),
   };
 }

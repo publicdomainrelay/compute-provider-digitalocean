@@ -36,6 +36,12 @@ export interface ComputeProviderCtx {
   atproto: ComputeAtproto;
 }
 
+export interface GuestGone {
+  id: string | number;
+  reason: string;
+  exitCode?: number;
+}
+
 export interface ComputeProvider {
   readonly name: string;
   provision(
@@ -50,6 +56,7 @@ export interface ComputeProvider {
     bundle: Record<string, unknown>,
   ): string;
   getDroplet?(id: string): Record<string, unknown> | undefined;
+  onGuestGone?(listener: (gone: GuestGone) => void): () => void;
   setup?(): Promise<void>;
   teardown?(): Promise<void>;
 }

@@ -37,10 +37,18 @@ export interface MicrovmResult {
   container: string;
 }
 
+export interface MicrovmExit {
+  container: string;
+  reason: "exited" | "removed";
+  exitCode?: number;
+  logs: string;
+}
+
 export interface Microvm {
   readonly name: string;
   boot(spec: MicrovmSpec): Promise<MicrovmResult>;
   stop(workDir: string): Promise<void>;
+  watch(container: string, onExit: (exit: MicrovmExit) => void): () => void;
 
   /**
    * The address a guest of this microvm reaches THIS HOST at.
@@ -62,10 +70,13 @@ export interface FirecrackerMicrovmOptions {
   runnerImage: string;
   firecrackerPath?: string;
   bootTimeoutMs?: number;
+  watchIntervalMs?: number;
   logger?: { info(event: string, extra?: Record<string, unknown>): void };
 }
 
 const DEFAULT_BOOT_TIMEOUT_MS = 180_000;
+const DEFAULT_WATCH_INTERVAL_MS = 5_000;
+const NO_SUCH_CONTAINER = /no such (object|container)|not found/i;
 const DEFAULT_FIRECRACKER = "/usr/local/bin/firecracker";
 
 interface WireSpec {
@@ -164,7 +175,20 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
   const backend = opts.backend;
   const runnerImage = opts.runnerImage;
   const bootTimeoutMs = opts.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
+  const watchIntervalMs = opts.watchIntervalMs ?? DEFAULT_WATCH_INTERVAL_MS;
   const firecracker = opts.firecrackerPath ?? DEFAULT_FIRECRACKER;
+
+  async function containerState(name: string): Promise<{ exists: boolean; running: boolean; exitCode?: number }> {
+    const inspected = await backend.command(["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", name])
+      .catch((err: unknown) => ({ code: -1, stdout: "", stderr: String(err) }));
+    if (inspected.code !== 0) {
+      if (NO_SUCH_CONTAINER.test(inspected.stderr)) return { exists: false, running: false };
+      throw new Error(`inspecting container ${name} failed: ${inspected.stderr.trim()}`);
+    }
+    const [running, exitCode] = inspected.stdout.trim().split(/\s+/);
+    const code = Number(exitCode);
+    return { exists: true, running: running === "true", exitCode: Number.isFinite(code) ? code : undefined };
+  }
 
   async function containerLogs(name: string, tail = 60): Promise<string> {
     const out = await backend.command(["logs", "--tail", String(tail), name]).catch(() => null);
@@ -292,6 +316,41 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
       }
       await backend.kill(container).catch(() => {});
       await backend.rm(container).catch(() => {});
+      const state = await containerState(container);
+      if (state.exists) {
+        throw new Error(
+          `container ${container} still exists after kill and rm, so the work directory ${workDir} it ` +
+            `mounts is kept: removing it under a live guest deletes the disk the guest is running on`,
+        );
+      }
+      await Deno.remove(workDir, { recursive: true }).catch((err: unknown) => {
+        if (!(err instanceof Deno.errors.NotFound)) throw err;
+      });
+      opts.logger?.info("microvm_work_dir_removed", { container, workDir });
+    },
+    watch(container: string, onExit: (exit: MicrovmExit) => void): () => void {
+      let cancelled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const schedule = () => {
+        if (cancelled) return;
+        timer = setTimeout(check, watchIntervalMs);
+        Deno.unrefTimer(Number(timer));
+      };
+      const check = async () => {
+        timer = undefined;
+        if (cancelled) return;
+        const state = await containerState(container).catch(() => undefined);
+        if (cancelled) return;
+        if (state === undefined || state.running) return schedule();
+        cancelled = true;
+        const logs = state.exists ? await containerLogs(container) : "";
+        onExit({ container, reason: state.exists ? "exited" : "removed", exitCode: state.exitCode, logs });
+      };
+      schedule();
+      return () => {
+        cancelled = true;
+        if (timer !== undefined) clearTimeout(timer);
+      };
     },
   };
 }
