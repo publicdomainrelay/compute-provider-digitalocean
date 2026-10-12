@@ -4,7 +4,7 @@ import {
   onNetworkUrlFromBundle,
   withOnNetworkBaseUrl,
   withOnNetworkReporter,
-} from "@publicdomainrelay/compute-provider-firecracker";
+} from "@publicdomainrelay/compute-provider-common";
 
 const ACCEPT_PATH = "/root/secrets/publicdomainrelay.com/market/accept.json";
 

@@ -1,12 +1,21 @@
 import { Hono } from "@hono/hono";
-import { parse as yamlParse, stringify as yamlStringify } from "npm:yaml@^2.7.0";
-import { acceptBundleModule, buildUserData, getUserDataModules } from "@publicdomainrelay/cloud-init-common";
-import type {
-  CloudInitContext,
-  UserDataModule,
-  UserDataPatch,
-  WriteFileEntry,
-} from "@publicdomainrelay/cloud-init-common";
+import {
+  addressTheRequesterNamed,
+  DEFAULT_GUEST_RANGE_BASE,
+  EVENT_NSID,
+  type GuestNetwork,
+  injectAcceptBundle,
+  networkFor,
+  ON_NETWORK_NSID,
+  parseMemMiB,
+  pointGuestAtHost,
+  SECRETS_PREFIX,
+  shortId,
+  SUBMIT_EVENT_NSID,
+  WIF_SIMPLE_NSID,
+  withOnNetworkBaseUrl,
+  withOnNetworkReporter,
+} from "@publicdomainrelay/compute-provider-common";
 import type {
   AdoptResult,
   ComputeAtproto,
@@ -31,16 +40,6 @@ import {
 } from "@publicdomainrelay/oidc-issuer-hono";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import { DEFAULT_ACCEPT_PATH_VM } from "@publicdomainrelay/secrets-common";
-
-export const WIF_SIMPLE_NSID = "com.publicdomainrelay.temp.compute.config.wif.simple";
-
-export const ON_NETWORK_NSID = "com.publicdomainrelay.temp.compute.events.vm.onNetwork";
-
-export const EVENT_NSID = "com.publicdomainrelay.temp.market.event";
-
-export const SUBMIT_EVENT_NSID = "com.publicdomainrelay.temp.market.submitEvent";
-
-export const SECRETS_PREFIX = "/root/secrets/digitalocean.com/serviceaccount";
 
 export interface GuestContractEntry {
   receiptKey: string;
@@ -96,7 +95,7 @@ export interface ComputeProviderFirecrackerCtx extends ComputeProviderCtx {
 interface Guest {
   name: string;
   workDir: string;
-  network: { guestIp: string; gateway: string; pastaIp: string; prefix: number; guestMac: string };
+  network: GuestNetwork;
   userDataFile: string;
   /**
    * The requester's PLC and the role it asked for, kept because the issuer's
@@ -111,10 +110,6 @@ interface Guest {
 function didWebToHttps(didOrUrl: string): string {
   return didOrUrl.startsWith("did:web:") ? "https://" + didOrUrl.slice("did:web:".length) : didOrUrl;
 }
-
-const PREFIX_BITS = 30;
-
-const DEFAULT_RANGE_BASE = "172.30.0.0";
 
 const GUEST_NAME = /^fc-[0-9a-f]+-[0-9a-f]+$/;
 
@@ -155,453 +150,10 @@ async function readGuestRecord(workDir: string): Promise<GuestRecord | undefined
   }
 }
 
-function octets(address: string): [number, number, number, number] {
-  const parts = address.split(".").map((p) => Number(p));
-  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
-    throw new Error(`${address} is not an IPv4 address, and a guest's address and its MAC are derived from it`);
-  }
-  return parts as [number, number, number, number];
-}
-
-export function guestMacFor(address: string): string {
-  const [a, b, c, d] = octets(address);
-  const hex = (n: number) => n.toString(16).padStart(2, "0");
-  return `06:00:${hex(a)}:${hex(b)}:${hex(c)}:${hex(d)}`;
-}
-
-export function networkFor(base: string, index: number): Guest["network"] {
-  const [a, b, c] = octets(base);
-  if (index < 0 || index > 16383) {
-    throw new Error(
-      `guest index ${index} is outside the 16384 /30 blocks a range based at ${base} holds. The ` +
-        `addresses a host hands out are a bounded pool and the pool is exhausted rather than ` +
-        `wrapped: two guests sharing one range are two guests whose packets arrive at whichever ` +
-        `the host routes to.`,
-    );
-  }
-  const block = index * 4;
-  const third = c + Math.floor(block / 256);
-  const fourth = block % 256;
-  const pastaIp = `${a}.${b}.${third}.${fourth}`;
-  const gateway = `${a}.${b}.${third}.${fourth + 1}`;
-  const guestIp = `${a}.${b}.${third}.${fourth + 2}`;
-  return { guestIp, gateway, pastaIp, prefix: PREFIX_BITS, guestMac: guestMacFor(guestIp) };
-}
-
-function shortId(value: string): string {
-  let h1 = 0xdeadbeef ^ value.length;
-  let h2 = 0x41c6ce57 ^ value.length;
-  for (let i = 0; i < value.length; i++) {
-    const ch = value.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0").slice(0, 4);
-}
-
-export function injectAcceptBundle(
-  userData: string,
-  bundle: Record<string, unknown>,
-  acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
-): string {
-  return buildUserData({ base: userData, modules: [acceptBundleModule(acceptPathVm, bundle)] });
-}
-
-/**
- * The URL a guest reports its iroh ticket to, read out of the accept bundle the
- * bidder injected. The bidder is the only party that knows its own relay URL,
- * and it is the bidder's `/v1/on-network` that holds the accept-to-receipt map
- * and submits the wrapped event to the requester. When the bundle carries none
- * (an older bidder), this provider's own endpoint is used.
- */
-export function onNetworkUrlFromBundle(userData: string, fallback: string): string {
-  const match = /"guest_onnetwork_url"\s*:\s*"([^"]+)"/.exec(userData);
-  return match ? match[1] : `${fallback.replace(/\/+$/, "")}/v1/on-network`;
-}
-
-export interface OnNetworkTarget {
-  url: string;
-  resolve?: string;
-}
-
-/**
- * Where a guest can actually deliver its report. The first target is the URL as
- * written. The second, when the guest's cloud-config names the host it reaches
- * the relay dispatcher at (`<ip> relay.localhost`), pins that same address for
- * the relay's own name: a guest's route to the host is the one pasta hands it,
- * and the address in /etc/hosts for a relay name is the microVM's own gateway,
- * which carries no arbitrary port.
- */
-export function onNetworkTargets(userData: string, fallbackUrl: string): OnNetworkTarget[] {
-  const url = onNetworkUrlFromBundle(userData, fallbackUrl);
-  const targets: OnNetworkTarget[] = [{ url }];
-  const relayIp = /(\d+\.\d+\.\d+\.\d+)\s+relay\.localhost/.exec(userData)?.[1];
-  if (!relayIp) return targets;
-  try {
-    const parsed = new URL(url);
-    if (parsed.hostname.endsWith(".localhost")) {
-      targets.push({ url, resolve: `${parsed.hostname}:${parsed.port || "80"}:${relayIp}` });
-    }
-  } catch {
-    /* the URL as written is the only target */
-  }
-  return targets;
-}
-
-/**
- * guest-onnetwork -- report the iroh ticket the iroh listener wrote to
- * /run/guest-fqdn back to the market, so the requester learns the one address it
- * can open an SSH session to. Nothing else reports it: the guest is born from
- * this user_data, and without this module the requester waits until its FQDN
- * timeout while only the bidder-side onNetwork (the guest's raw, unroutable IP)
- * is ever published.
- *
- * Composed into user_data, never baked into the image: curl and jq are already
- * in the node image, and what the script says is a property of the contract
- * (which accept, which endpoint), not of the disk.
- */
-export function onNetworkReporterModule(
-  targets: OnNetworkTarget[],
-  acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
-): UserDataModule {
-  const attempts: string[] = [];
-  let index = 0;
-  for (const target of targets) {
-    index += 1;
-    const name = `CODE${index}`;
-    const resolve = target.resolve ? `--resolve "${target.resolve}" ` : "";
-    attempts.push(
-      `  ${name}="$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' ${resolve}\\`,
-      `    -X POST "${target.url}" -H 'Content-Type: application/json' -d "\${PAYLOAD}" \\`,
-      "    2>>/tmp/guest-onnetwork.err || echo 000)\"",
-      `  echo "guest-onnetwork: http \${${name}} ${target.url}"`,
-      `  if [ "\${${name}}" = "200" ]; then echo "guest-onnetwork: reported \${FQDN}"; exit 0; fi`,
-    );
-  }
-
-  const script = [
-    "#!/usr/bin/env bash",
-    "set -uo pipefail",
-    `ACCEPT_JSON="${acceptPathVm}"`,
-    'if [ ! -f "${ACCEPT_JSON}" ]; then echo "guest-onnetwork: no ${ACCEPT_JSON}"; exit 0; fi',
-    'FQDN=""',
-    "for _ in $(seq 1 90); do",
-    '  FQDN="$(cat /run/guest-fqdn 2>/dev/null || true)"',
-    '  [ -n "${FQDN}" ] && break',
-    "  sleep 2",
-    "done",
-    "if [ -z \"${FQDN}\" ]; then",
-    '  echo "guest-onnetwork: no /run/guest-fqdn after 180s"',
-    '  echo "guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)"',
-    "  journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40",
-    "  exit 0",
-    "fi",
-    'ACCEPT_URI="$(jq -r \'.accept.uri // empty\' "${ACCEPT_JSON}")"',
-    'ACCEPT_CID="$(jq -r \'.accept.cid // empty\' "${ACCEPT_JSON}")"',
-    'if [ -z "${ACCEPT_URI}" ] || [ -z "${ACCEPT_CID}" ]; then echo "guest-onnetwork: accept.json has no accept ref"; exit 0; fi',
-    'PAYLOAD="$(jq -nc --arg au "${ACCEPT_URI}" --arg ac "${ACCEPT_CID}" --arg addr "${FQDN}" \\',
-    "  '{acceptUri: $au, acceptCid: $ac, address: $addr}')" + '"',
-    'echo "guest-onnetwork: reporting ${FQDN}"',
-    "for _ in 1 2 3 4 5; do",
-    ...attempts,
-    "  sleep 6",
-    "done",
-    'echo "guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)"',
-    "",
-  ].join("\n");
-
-  const unit = [
-    "[Unit]",
-    "Description=Report the guest iroh ticket to the market",
-    "After=network-online.target iroh.service",
-    "Wants=network-online.target iroh.service",
-    "",
-    "[Service]",
-    "Type=oneshot",
-    "RemainAfterExit=yes",
-    "ExecStart=/usr/local/bin/send-onnetwork.sh",
-    "StandardOutput=journal+console",
-    "StandardError=journal+console",
-    "",
-    "[Install]",
-    "WantedBy=multi-user.target",
-    "",
-  ].join("\n");
-
-  return () => ({
-    write_files: [
-      { path: "/usr/local/bin/send-onnetwork.sh", owner: "root:root", permissions: "0700", content: script },
-      { path: "/etc/systemd/system/guest-onnetwork.service", owner: "root:root", permissions: "0644", content: unit },
-    ],
-    runcmdPrepend: [
-      "systemctl daemon-reload",
-      "systemctl enable --no-block guest-onnetwork.service",
-      "systemctl start --no-block guest-onnetwork.service",
-    ],
-  });
-}
-
-/**
- * Compose the FQDN reporter into a guest's user_data. A user_data that already
- * carries a guest-onnetwork unit (an `oidcProvisioning` composed one) is left
- * alone: two reporters would race to publish the same event.
- */
-/**
- * What the guest's on-network reporter reads to learn where to post.
- *
- * The reporter the OIDC enricher composes gets its URL from
- * /root/secrets/digitalocean.com/serviceaccount/base_url, and the only writer of
- * that file is the provisioning-token script, which writes it only when its token
- * exchange succeeds. A provider with no issuer therefore leaves the guest with no
- * base_url, the reporter falls back to the public dispatcher, and its POST answers
- * 404 - the service fails and the requester never learns the guest's iroh
- * ticket. This provider already knows the URL, so it writes it.
- */
-export function withOnNetworkBaseUrl(
-  userData: string,
-  fallbackUrl: string,
-): string {
-  const path = "/root/secrets/digitalocean.com/serviceaccount/base_url";
-  if (userData.includes(path)) return userData;
-  const origin = new URL(onNetworkUrlFromBundle(userData, fallbackUrl)).origin;
-  return buildUserData({
-    base: userData,
-    modules: [() => ({
-      write_files: [{ path, owner: "root:root", permissions: "0600", content: `${origin}\n` }],
-      runcmdPrepend: [["sh", "-c", `install -d -m 0700 -o root -g root ${path.split("/").slice(0, -1).join("/")}`]],
-    })],
-  });
-}
-
-export function withOnNetworkReporter(
-  userData: string,
-  fallbackUrl: string,
-  acceptPathVm: string = DEFAULT_ACCEPT_PATH_VM,
-): string {
-  if (userData.includes("guest-onnetwork.service")) return userData;
-  return buildUserData({
-    base: userData,
-    modules: [onNetworkReporterModule(onNetworkTargets(userData, fallbackUrl), acceptPathVm)],
-  });
-}
-
-export interface PreinstallFile {
-  path: string;
-  mode?: string;
-  content?: string;
-  source?: string;
-}
-
-export interface PreinstallManifest {
-  packages: string[];
-  files: PreinstallFile[];
-  runs: string[];
-  leftToBoot: { packages: string[]; files: string[]; runs: string[] };
-}
-
-export interface PreinstallManifestInput {
-  modules: string[];
-  ctx?: Partial<CloudInitContext>;
-  base?: Partial<Omit<PreinstallManifest, "leftToBoot">>;
-}
-
-export function shellCommandLine(entry: unknown, moduleId: string): string {
-  if (typeof entry === "string") return entry;
-  if (Array.isArray(entry)) {
-    if (entry.some((part) => typeof part !== "string")) {
-      throw new Error(
-        `the user-data module ${moduleId} prepends a command whose arguments are not all strings: ${
-          JSON.stringify(entry)
-        }. The preinstall runs these during the build, and a build step that is not a string is one ` +
-          `this cannot render as the shell command the manifest carries.`,
-      );
-    }
-    return entry.map((part) => `'${String(part).replaceAll("'", `'\\''`)}'`).join(" ");
-  }
-  throw new Error(
-    `the user-data module ${moduleId} prepends a runcmd entry that is neither a string nor an argv ` +
-      `array: ${JSON.stringify(entry)}. Both spellings are commands the guest would run at boot, and ` +
-      `a third spelling is one this would bake as nothing while the boot-time copy still ran.`,
-  );
-}
-
-function preinstallFileFor(moduleId: string, entry: WriteFileEntry): PreinstallFile {
-  if (typeof entry.path !== "string" || !entry.path.startsWith("/")) {
-    throw new Error(
-      `the user-data module ${moduleId} writes ${JSON.stringify(entry.path)}, which is not an ` +
-        `absolute path inside the guest. The build writes preinstalled files into the staged rootfs ` +
-        `at that path, so a relative one would land wherever the build was running.`,
-    );
-  }
-  const owner = entry.owner === undefined ? "root:root" : String(entry.owner);
-  if (owner !== "root:root" && owner !== "root") {
-    throw new Error(
-      `the user-data module ${moduleId} writes ${entry.path} owned by ${owner}, and the preinstall ` +
-        `manifest has no owner: the build writes these files as root, so baking this one would bake ` +
-        `a file whose owner is not the one the module asked for, and the difference would show up ` +
-        `only inside a guest as a service that cannot read its own config.`,
-    );
-  }
-  if (typeof entry.content !== "string") {
-    throw new Error(
-      `the user-data module ${moduleId} writes ${entry.path} with no content in the user_data, so ` +
-        `there is nothing to bake there. The preinstall carries content or a source, and the source ` +
-        `spelling exists for a file too large to sit in a JSON manifest.`,
-    );
-  }
-  return {
-    path: entry.path,
-    mode: entry.permissions === undefined ? undefined : String(entry.permissions),
-    content: entry.content,
-  };
-}
-
-interface ModuleContribution {
-  packages: string[];
-  files: Map<string, PreinstallFile>;
-  runs: string[];
-}
-
-function contributionOf(ids: string[], ctx: Partial<CloudInitContext>): ModuleContribution {
-  const packages: string[] = [];
-  const files = new Map<string, PreinstallFile>();
-  const runs: string[] = [];
-  for (const id of ids) {
-    const patch: UserDataPatch = getUserDataModules([id])[0](ctx);
-    const apt = patch.apt as Record<string, unknown> | undefined;
-    if (apt !== undefined && apt.sources !== undefined) {
-      throw new Error(
-        `the user-data module ${id} adds apt sources, and the preinstall has none: the image ` +
-          `carries no repository of its own, so a package from that source cannot be baked and the ` +
-          `guest would reach the network for it at first boot -- which is the boot this manifest ` +
-          `exists to make unnecessary. Bake the package into the base image instead.`,
-      );
-    }
-    for (const name of patch.packages ?? []) {
-      if (!packages.includes(name)) packages.push(name);
-    }
-    for (const entry of patch.write_files ?? []) {
-      const file = preinstallFileFor(id, entry);
-      files.set(file.path, file);
-    }
-    for (const entry of patch.runcmdPrepend ?? []) {
-      runs.unshift(shellCommandLine(entry, id));
-    }
-  }
-  return { packages, files, runs };
-}
-
-export function preinstallManifest(input: PreinstallManifestInput): PreinstallManifest {
-  for (const module of input.modules) {
-    if (typeof module !== "string") {
-      throw new Error(
-        `preinstallManifest was given a module function rather than the id of a registered one, and ` +
-          `a function closes over whatever it was built for: acceptBundleModule carries one ` +
-          `contract's bundle inside it, so a derivation that accepted functions could bake one ` +
-          `guest's accept.json into every guest's image. Derive from ids, which name modules the ` +
-          `image can carry, and leave per-contract values to the boot-time user_data.`,
-      );
-    }
-  }
-  const ctx = input.ctx ?? {};
-  const wanted = contributionOf(input.modules, ctx);
-  const withoutInstanceValues = contributionOf(input.modules, {});
-
-  const packages = [...(input.base?.packages ?? [])];
-  const leftPackages: string[] = [];
-  for (const name of wanted.packages) {
-    if (withoutInstanceValues.packages.includes(name)) {
-      if (!packages.includes(name)) packages.push(name);
-    } else {
-      leftPackages.push(name);
-    }
-  }
-
-  const files = [...(input.base?.files ?? [])];
-  const leftFiles: string[] = [];
-  for (const [path, file] of wanted.files) {
-    const same = withoutInstanceValues.files.get(path);
-    if (same !== undefined && same.content === file.content && same.mode === file.mode) {
-      const at = files.findIndex((existing) => existing.path === path);
-      if (at >= 0) files[at] = file;
-      else files.push(file);
-    } else {
-      leftFiles.push(path);
-    }
-  }
-
-  const runs = [...(input.base?.runs ?? [])];
-  const leftRuns: string[] = [];
-  for (const [index, run] of wanted.runs.entries()) {
-    if (withoutInstanceValues.runs[index] === run) runs.push(run);
-    else leftRuns.push(run);
-  }
-
-  return {
-    packages,
-    files,
-    runs,
-    leftToBoot: { packages: leftPackages, files: leftFiles, runs: leftRuns },
-  };
-}
-
-/**
- * The address a requester already named for this host, if it named one.
- *
- * A requester can put the host in the guest's /etc/hosts itself -- the market
- * harness passes `guestHostAliases` as `<address> relay.localhost` and does so
- * precisely because a NodeClaim carries no such thing. When it has, that line is
- * in the document the guest boots with, and cloud-init resolves a name before
- * the step below can append a line for it, so a second line is a line that never
- * wins: the requester's address has to be the one this provider names too.
- */
-export function addressTheRequesterNamed(userData: string): string | undefined {
-  return /(\d+\.\d+\.\d+\.\d+)\s+relay\.localhost/.exec(userData)?.[1];
-}
-
-function pointGuestAtHost(userData: string, gateway: string, guestTlsPort?: number): string {
-  const patched = guestTlsPort
-    ? userData.replace(/https:\/\/([a-z0-9.-]+\.localhost)(?![:.\w-])/gi, `https://$1:${guestTlsPort}`)
-    : userData;
-  const hosts = new Set<string>();
-  for (const m of patched.matchAll(/https?:\/\/([a-z0-9.-]+\.localhost)/gi)) hosts.add(m[1]);
-  if (hosts.size === 0) return patched;
-  let obj: Record<string, unknown> | null = null;
-  try {
-    obj = yamlParse(patched.replace(/^#cloud-config\s*/i, "")) as Record<string, unknown> | null;
-  } catch {
-    obj = null;
-  }
-  if (!obj || typeof obj !== "object") {
-    throw new Error(
-      "the cloud-init document this guest was given is not the YAML this reads, so the names it " +
-        "resolves to the host cannot be added to it. A guest whose relay name resolves nowhere " +
-        "installs its services and then cannot reach the thing that makes it reachable, and the " +
-        "failure reads as a guest address that never appears rather than as a host that was never named.",
-    );
-  }
-  const runcmd = (obj["runcmd"] as unknown[]) ?? [];
-  for (const host of hosts) runcmd.unshift(["sh", "-c", `echo ${gateway} ${host} >> /etc/hosts`]);
-  obj["runcmd"] = runcmd;
-  if (guestTlsPort) {
-    const writeFiles = (obj["write_files"] as unknown[]) ?? [];
-    writeFiles.push({
-      path: "/root/.curlrc",
-      owner: "root:root",
-      permissions: "0644",
-      content: `resolve = *:${guestTlsPort}:${gateway}\n`,
-    });
-    obj["write_files"] = writeFiles;
-  }
-  return "#cloud-config\n" + yamlStringify(obj, { lineWidth: 0 });
-}
-
 export function createComputeProviderFirecracker(ctx: ComputeProviderFirecrackerCtx) {
   const { logger, atproto, image, microvm, workRoot } = ctx;
   const acceptPathVm = ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM;
-  const rangeBase = ctx.rangeBase ?? DEFAULT_RANGE_BASE;
+  const rangeBase = ctx.rangeBase ?? DEFAULT_GUEST_RANGE_BASE;
   const hostBootId = ctx.hostBootId ?? readHostBootId;
 
   const guests = new Map<string, Guest>();
@@ -980,23 +532,6 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     dropletForIssuer,
     oidcIssuer,
   };
-}
-
-export function parseMemMiB(mem: unknown): number | undefined {
-  if (typeof mem !== "string") return undefined;
-  const m = /^\s*(\d+)\s*([KMGT])?i?B?\s*$/i.exec(mem);
-  if (!m) return undefined;
-  const value = Number(m[1]);
-  switch ((m[2] ?? "M").toUpperCase()) {
-    case "K":
-      return Math.max(1, Math.round(value / 1024));
-    case "G":
-      return value * 1024;
-    case "T":
-      return value * 1024 * 1024;
-    default:
-      return value;
-  }
 }
 
 export function createFirecrackerComputeProvider(ctx: ComputeProviderFirecrackerCtx) {

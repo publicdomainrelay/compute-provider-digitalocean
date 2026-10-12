@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { withOnNetworkReporter } from "@publicdomainrelay/compute-provider-firecracker";
+import { withOnNetworkReporter } from "@publicdomainrelay/compute-provider-common";
 
 const ROOT = new URL("../", import.meta.url).pathname;
 const SCANNED = ["lib", "hono-compute-provider", "hono-firecracker-standalone", "deno.json"];

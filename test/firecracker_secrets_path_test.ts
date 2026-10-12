@@ -1,5 +1,5 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { SECRETS_PREFIX } from "@publicdomainrelay/compute-provider-firecracker";
+import { SECRETS_PREFIX } from "@publicdomainrelay/compute-provider-common";
 import { createOidcIssuer } from "@publicdomainrelay/oidc-issuer-hono";
 
 Deno.test("the firecracker bid config points the guest at the token the provisioning script writes", async () => {

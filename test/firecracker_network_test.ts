@@ -4,7 +4,7 @@ import {
   guestMacFor,
   networkFor,
   parseMemMiB,
-} from "@publicdomainrelay/compute-provider-firecracker";
+} from "@publicdomainrelay/compute-provider-common";
 
 // The guest's address is not configured by cloud-init. The firecracker base
 // image ships fcnet-setup.sh, taken from firecracker's own integration tests,

@@ -2,5 +2,10 @@
   "name": "@publicdomainrelay/compute-provider-common",
   "version": "0.0.0",
   "license": "Unlicense",
-  "exports": "./mod.ts"
+  "exports": "./mod.ts",
+  "imports": {
+    "@publicdomainrelay/cloud-init-common": "jsr:@publicdomainrelay/cloud-init-common@^0",
+    "@publicdomainrelay/secrets-common": "jsr:@publicdomainrelay/secrets-common@^0",
+    "yaml": "npm:yaml@^2.7.0"
+  }
 }

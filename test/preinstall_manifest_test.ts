@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { preinstallManifest, shellCommandLine } from "@publicdomainrelay/compute-provider-firecracker";
+import { preinstallManifest, shellCommandLine } from "@publicdomainrelay/compute-provider-common";
 import {
   acceptBundleModule,
   getUserDataModules,
