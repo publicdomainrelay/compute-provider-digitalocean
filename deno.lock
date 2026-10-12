@@ -1659,6 +1659,7 @@
           "jsr:@publicdomainrelay/market-lexicons@0",
           "jsr:@publicdomainrelay/operator-discovery-badge-blue-keys@0",
           "jsr:@publicdomainrelay/policies-gha-lite@0",
+          "jsr:@publicdomainrelay/policy-common@0",
           "jsr:@publicdomainrelay/policy-deno-typescript@0",
           "jsr:@publicdomainrelay/policy-engine-abc@0",
           "jsr:@publicdomainrelay/policy-engine-cli-options@0",
@@ -1666,6 +1667,7 @@
           "jsr:@publicdomainrelay/policy-engine-executor-gha-lite@0",
           "jsr:@publicdomainrelay/policy-engine-executor-typescript@0",
           "jsr:@publicdomainrelay/requester-abc@0",
+          "jsr:@publicdomainrelay/scope-refresh-timers@0",
           "jsr:@publicdomainrelay/trust-graph-tangled-graph@0",
           "npm:@atproto/common-web@0.5",
           "npm:@atproto/crypto@0.5",
@@ -2059,6 +2061,7 @@
           "jsr:@publicdomainrelay/market-atproto@0",
           "jsr:@publicdomainrelay/market-common@0",
           "jsr:@publicdomainrelay/market-lexicons@0",
+          "jsr:@publicdomainrelay/policy-engine-evaluator@0",
           "jsr:@publicdomainrelay/requester-abc@0",
           "jsr:@publicdomainrelay/serve@0",
           "npm:@atproto/common@0.5",
@@ -2076,6 +2079,15 @@
         "dependencies": [
           "jsr:@publicdomainrelay/sandbox-abc@0.0.0",
           "jsr:@publicdomainrelay/sandbox-common@0"
+        ]
+      },
+      "jsr:@publicdomainrelay/scope-refresh-abc@0.0.0": {},
+      "jsr:@publicdomainrelay/scope-refresh-timers@0.0.0": {
+        "dependencies": [
+          "jsr:@publicdomainrelay/policy-common@0",
+          "jsr:@publicdomainrelay/policy-engine-evaluator@0",
+          "jsr:@publicdomainrelay/policy-engine-scope-cache@0",
+          "jsr:@publicdomainrelay/scope-refresh-abc@0"
         ]
       },
       "jsr:@publicdomainrelay/secret-store-chain@0.0.0": {},
