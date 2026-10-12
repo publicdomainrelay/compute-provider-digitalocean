@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
-import { parse } from "yaml";
+import { parse } from "@std/yaml";
 
 const ORG_ROOT = new URL("../../", import.meta.url);
 const INVENTORY = new URL("socialweb-computer-kcp/docs/compute-provider-requirements.yaml", ORG_ROOT);

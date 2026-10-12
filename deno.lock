@@ -11,6 +11,7 @@
     "jsr:@std/fmt@^1.0.10": "1.0.10",
     "jsr:@std/internal@^1.0.12": "1.0.14",
     "jsr:@std/text@^1.0.19": "1.0.19",
+    "jsr:@std/yaml@1": "1.1.1",
     "npm:@atiproto/key-resolver@0.1": "0.1.0",
     "npm:@atproto/api@~0.20.8": "0.20.28",
     "npm:@atproto/common-web@0.5": "0.5.6",
@@ -79,6 +80,9 @@
     },
     "@std/text@1.0.19": {
       "integrity": "003a0e032d360e8c3a4e0410fb792c77a66bd6553fee9d60c6ec1bce30d29223"
+    },
+    "@std/yaml@1.1.1": {
+      "integrity": "a57665ecf3d17b926380593a56625d8a10cc7281802f1e993b5ebc94a48e71f8"
     }
   },
   "npm": {
@@ -1389,9 +1393,9 @@
     "dependencies": [
       "jsr:@hono/hono@*",
       "jsr:@std/assert@^1.0.19",
+      "jsr:@std/yaml@1",
       "npm:@atproto/crypto@0.5",
-      "npm:hono@4",
-      "npm:yaml@^2.7.0"
+      "npm:hono@4"
     ],
     "members": {
       "hono-compute-provider": {
