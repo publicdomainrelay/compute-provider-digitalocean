@@ -41,6 +41,16 @@ const DEFAULT_PASTA = "/usr/bin/pasta";
 const DEFAULT_BOOT_TIMEOUT_MS = 180_000;
 const DEFAULT_WATCH_INTERVAL_MS = 5_000;
 const UNIT_PREFIX = "socialweb-vm-";
+const DEFAULT_TAP = "fctap0";
+const GUEST_ROUTE_SCRIPT = [
+  'tap=$1 guest=$2 own=$3; shift 3',
+  'br=$(basename "$(readlink /sys/class/net/$tap/master)")',
+  'mac=$(bridge fdb show brport "$tap" | awk \'!/permanent/ {print $1; exit}\')',
+  '[ -n "$mac" ] || { echo "no guest MAC learned on $tap yet" >&2; exit 1; }',
+  'ip route replace "$guest/32" dev "$br" src "$own"',
+  'ip neigh replace "$guest" lladdr "$mac" dev "$br" nud permanent',
+  'exec "$@"',
+].join("\n");
 
 export function parseSubid(text: string, account: string): SubidRange {
   for (const line of text.split("\n")) {
@@ -263,7 +273,11 @@ export function createUsernsFirecrackerMicrovm(opts: UsernsMicrovmOptions): Micr
           const nsPid = (await childrenOf(pastaPid))[0];
           const hostVmmPid = await descendantNamed(pastaPid, "firecracker");
           if (nsPid !== undefined) {
-            netExec.set(spec.name, [...asAccount, "nsenter", "-t", String(nsPid), "-U", "-n", "--preserve-credentials"]);
+            netExec.set(spec.name, [
+              ...asAccount, "nsenter", "-t", String(nsPid), "-U", "-n", "--preserve-credentials", "--keep-caps",
+              "/bin/sh", "-c", GUEST_ROUTE_SCRIPT, "sh",
+              spec.network.tap ?? DEFAULT_TAP, spec.network.guestIp, spec.network.pastaIp,
+            ]);
           }
           const result: MicrovmResult = {
             name: String(parsed.name),
