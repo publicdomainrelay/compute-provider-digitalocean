@@ -1,0 +1,42 @@
+{
+  "apiVersion": "socialweb.computer/v1alpha1",
+  "kind": "ComputeVM",
+  "metadata": {
+    "name": "fc-1379be663dd9-6e867147",
+    "deletionTimestamp": "2026-10-12T04:00:00Z",
+    "finalizers": ["computevm.socialweb.computer/release"]
+  },
+  "spec": {
+    "vm": {
+      "cpus": 2,
+      "mem": "4G",
+      "disk": "20G",
+      "role": "builder"
+    },
+    "owner": {
+      "handle": "bobvmbuilder.bsky.social"
+    },
+    "userDataSecret": "fc-1379be663dd9-6e867147-user-data",
+    "requester": {
+      "did": "did:plc:requesterrequester"
+    },
+    "stopGraceSeconds": 10
+  },
+  "status": {
+    "phase": "Releasing",
+    "observedGeneration": 1,
+    "network": {
+      "guestIP": "10.0.2.15",
+      "hostAddress": "10.0.2.2",
+      "prefix": 24,
+      "mac": "06:00:0a:00:02:0f"
+    },
+    "runtime": {
+      "backend": "proc",
+      "ref": "devsup-7",
+      "pid": 9001,
+      "startTime": "77"
+    },
+    "workDir": "/home/dev/.local/state/socialweb/bidder/vms/fc-1379be663dd9-6e867147"
+  }
+}

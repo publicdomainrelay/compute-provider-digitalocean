@@ -1,0 +1,22 @@
+{
+  "apiVersion": "socialweb.computer/v1alpha1",
+  "kind": "ComputeVM",
+  "metadata": {
+    "name": "fc-1379be663dd9-6e867147"
+  },
+  "spec": {
+    "vm": {
+      "cpus": 2,
+      "mem": "4G",
+      "disk": "20G",
+      "role": "builder"
+    },
+    "owner": {
+      "handle": "bobvmbuilder.bsky.social"
+    },
+    "userDataSecret": "fc-1379be663dd9-6e867147-user-data",
+    "requester": {
+      "did": "did:plc:requesterrequester"
+    }
+  }
+}

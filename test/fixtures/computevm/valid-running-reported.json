@@ -1,0 +1,115 @@
+{
+  "apiVersion": "socialweb.computer/v1alpha1",
+  "kind": "ComputeVM",
+  "metadata": {
+    "name": "fc-1379be663dd9-6e867147",
+    "resourceVersion": "212",
+    "generation": 1,
+    "finalizers": ["computevm.socialweb.computer/release"],
+    "annotations": {
+      "kcp.io/cluster": "1b2c3d4e5f6a"
+    }
+  },
+  "spec": {
+    "vm": {
+      "cpus": 2,
+      "mem": "4G",
+      "disk": "20G",
+      "role": "builder"
+    },
+    "owner": {
+      "handle": "bobvmbuilder.bsky.social"
+    },
+    "userDataSecret": "fc-1379be663dd9-6e867147-user-data",
+    "requester": {
+      "did": "did:plc:requesterrequester",
+      "plc": "https://plc.directory"
+    },
+    "contract": {
+      "receiptUri": "at://did:plc:bidderbidder/com.publicdomainrelay.temp.market.receipt/3lzrcp",
+      "receiptCid": "bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy",
+      "acceptUri": "at://did:plc:requesterrequester/com.publicdomainrelay.temp.market.accept/3lzacc",
+      "acceptCid": "bafyreiacceptacceptacceptacceptacceptacceptacceptacceptac",
+      "submitEventUrl": "https://requester.example.invalid/xrpc/com.publicdomainrelay.temp.market.submitEvent",
+      "acceptedAt": "2026-10-12T00:01:02Z"
+    },
+    "image": {
+      "reuseStale": true
+    },
+    "stopGraceSeconds": 30
+  },
+  "status": {
+    "phase": "Running",
+    "observedGeneration": 1,
+    "network": {
+      "guestIP": "10.0.2.15",
+      "hostAddress": "10.0.2.2",
+      "prefix": 24,
+      "mac": "06:00:0a:00:02:0f"
+    },
+    "image": {
+      "ref": "socialweb-node-guest-1.4.0",
+      "sha256": "9f2c4a1b0e7d6c5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f",
+      "hypervisor": "firecracker-v1.13.1"
+    },
+    "runtime": {
+      "backend": "systemd-user",
+      "ref": "opaque-runtime-handle",
+      "instance": "5a3c9e0b7d2f4e61a8b9c0d1e2f3a4b5",
+      "pid": 48211,
+      "startTime": "123456789",
+      "hostBootID": "0d7c1f2e-3a4b-4c5d-8e9f-a0b1c2d3e4f5",
+      "vmmID": "fc-1379be663dd9-6e867147"
+    },
+    "workDir": "/var/lib/socialweb/bidder/vms/fc-1379be663dd9-6e867147",
+    "bootedAt": "2026-10-12T00:01:30Z",
+    "message": "the runtime is not reachable; the phase is kept",
+    "conditions": [
+      {
+        "type": "Prepared",
+        "status": "True",
+        "reason": "SeedWritten",
+        "message": "",
+        "lastTransitionTime": "2026-10-12T00:01:10Z"
+      },
+      {
+        "type": "Started",
+        "status": "True",
+        "reason": "VMMStarted",
+        "message": "",
+        "lastTransitionTime": "2026-10-12T00:01:20Z"
+      },
+      {
+        "type": "RuntimeObserved",
+        "status": "Unknown",
+        "reason": "ManagerUnreachable",
+        "message": "dial timeout",
+        "lastTransitionTime": "2026-10-12T00:09:00Z"
+      },
+      {
+        "type": "GuestReported",
+        "status": "True",
+        "reason": "OnNetwork",
+        "message": "",
+        "lastTransitionTime": "2026-10-12T00:02:00Z"
+      }
+    ],
+    "market": {
+      "onNetworkUri": "at://did:plc:bidderbidder/com.publicdomainrelay.temp.market.event/3lznet",
+      "address": "fc-1379be663dd9-6e867147.bidder.example.invalid",
+      "hostKeys": [
+        {
+          "type": "ssh-ed25519",
+          "publicKey": "AAAAC3NzaC1lZDI1NTE5AAAAIGuestHostKeyGuestHostKeyGuestHostKey00",
+          "fingerprint": "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU"
+        },
+        {
+          "type": "ecdsa-sha2-nistp256",
+          "publicKey": "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBGuestKey"
+        }
+      ],
+      "hostKeysUri": "at://did:plc:bidderbidder/com.publicdomainrelay.temp.market.event/3lzhk",
+      "reportedAt": "2026-10-12T00:02:00Z"
+    }
+  }
+}

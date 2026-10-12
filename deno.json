@@ -3,6 +3,7 @@
   "workspace": [
     "./lib/common/container-backend",
     "./lib/common/compute-provider-common",
+    "./lib/common/compute-provider-kcp-common",
     "./lib/abc/container-backend",
     "./lib/abc/compute-provider",
     "./lib/abc/oidc-issuer",

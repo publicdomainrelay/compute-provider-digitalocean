@@ -1,0 +1,19 @@
+{
+  "expectError": "status.network.index",
+  "goDecodeRejects": true,
+  "object": {
+    "apiVersion": "socialweb.computer/v1alpha1",
+    "kind": "ComputeVM",
+    "metadata": { "name": "fc-a-1" },
+    "spec": {
+      "vm": { "cpus": 1, "mem": "1G", "disk": "10G", "role": "" },
+      "owner": { "handle": "bob.example.invalid" },
+      "userDataSecret": "fc-a-1-user-data",
+      "requester": { "did": "did:plc:requesterrequester" }
+    },
+    "status": {
+      "phase": "Running",
+      "network": { "guestIP": "172.30.0.6", "hostAddress": "172.30.0.5", "prefix": 30, "mac": "06:00:ac:1e:00:06", "index": 1 }
+    }
+  }
+}

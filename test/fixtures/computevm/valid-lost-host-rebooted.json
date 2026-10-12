@@ -1,0 +1,47 @@
+{
+  "apiVersion": "socialweb.computer/v1alpha1",
+  "kind": "ComputeVM",
+  "metadata": {
+    "name": "fc-1379be663dd9-77aa01ff",
+    "finalizers": ["computevm.socialweb.computer/release"]
+  },
+  "spec": {
+    "vm": {
+      "cpus": 1,
+      "mem": "512M",
+      "disk": "10G",
+      "role": ""
+    },
+    "owner": {
+      "handle": "bobvmbuilder.bsky.social"
+    },
+    "userDataSecret": "fc-1379be663dd9-77aa01ff-user-data",
+    "requester": {
+      "did": "did:plc:requesterrequester"
+    },
+    "contract": {
+      "acceptUri": "at://did:plc:requesterrequester/com.publicdomainrelay.temp.market.accept/3lzac2",
+      "acceptCid": "bafyreiaccept2accept2accept2accept2accept2accept2accept2a"
+    }
+  },
+  "status": {
+    "phase": "Lost",
+    "lostReason": "HostRebooted",
+    "observedGeneration": 1,
+    "runtime": {
+      "backend": "systemd-user",
+      "ref": "opaque-runtime-handle-2",
+      "hostBootID": "11111111-2222-4333-8444-555555555555"
+    },
+    "message": "the host booted since this VM started",
+    "conditions": [
+      {
+        "type": "RuntimeObserved",
+        "status": "False",
+        "reason": "HostRebooted",
+        "message": "boot id changed",
+        "lastTransitionTime": "2026-10-12T03:00:00Z"
+      }
+    ]
+  }
+}

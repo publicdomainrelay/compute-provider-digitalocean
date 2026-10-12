@@ -66,7 +66,8 @@ Deno.test("the ComputeVM constants are the Go constants", () => {
   ]);
   assertEquals(FINALIZER_COMPUTE_VM, "computevm.socialweb.computer/release");
   assertEquals(CONDITION_RUNTIME_OBSERVED, "RuntimeObserved");
-  assert(FIELD_MANAGER_COMPUTE_VM_CONTROLLER !== FIELD_MANAGER_COMPUTE_VM_PROVIDER);
+  assertEquals(FIELD_MANAGER_COMPUTE_VM_CONTROLLER, "computevm-controller");
+  assertEquals(FIELD_MANAGER_COMPUTE_VM_PROVIDER, "compute-provider-kcp");
   assertEquals(COMPUTE_VM_RESOURCE.plural, "computevms");
   assertEquals(COMPUTE_VM_RESOURCE.export, "computevms");
   assertEquals(COMPUTE_VM_RESOURCE.schema, "v1alpha1-1.computevms.socialweb.computer");

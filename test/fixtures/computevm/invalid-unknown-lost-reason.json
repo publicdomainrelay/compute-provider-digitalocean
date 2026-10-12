@@ -1,0 +1,16 @@
+{
+  "expectError": "status.lostReason",
+  "goDecodeRejects": false,
+  "object": {
+    "apiVersion": "socialweb.computer/v1alpha1",
+    "kind": "ComputeVM",
+    "metadata": { "name": "fc-a-1" },
+    "spec": {
+      "vm": { "cpus": 1, "mem": "1G", "disk": "10G", "role": "" },
+      "owner": { "handle": "bob.example.invalid" },
+      "userDataSecret": "fc-a-1-user-data",
+      "requester": { "did": "did:plc:requesterrequester" }
+    },
+    "status": { "phase": "Lost", "lostReason": "ManagerUnreachable" }
+  }
+}
