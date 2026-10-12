@@ -1,6 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
-import { createFirecrackerMicrovm } from "@publicdomainrelay/microvm-firecracker";
+import { createFirecrackerMicrovm, parseLabels } from "@publicdomainrelay/microvm-firecracker";
 import type { MicrovmSpec } from "@publicdomainrelay/microvm-firecracker";
 
 const RUNNER_IMAGE = "localhost/socialweb-firecracker-runner:local";
@@ -129,4 +129,51 @@ Deno.test("a guest is told to reach the host at the container's gateway, not pas
   } finally {
     await Deno.remove(root, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test("a guest's container carries the labels its bidder was given, so a sweep by label finds only its own", async () => {
+  const root = Deno.makeTempDirSync({ prefix: "microvm-labels-" });
+  try {
+    const workDir = `${root}/guests/fc-test-0001`;
+    await Deno.mkdir(workDir, { recursive: true });
+    const written: string[] = [];
+    const microvm = createFirecrackerMicrovm({
+      backend: backendThatBoots(aSpec(workDir), written),
+      runnerImage: RUNNER_IMAGE,
+      labels: { "swc.bed": "b3d00001" },
+    });
+    await microvm.boot(aSpec(workDir));
+    const run = written.find((line) => line.startsWith("run "))!;
+    assert(run.includes("--label swc.bed=b3d00001"), `run args carry no bed label: ${run}`);
+    assert(run.indexOf("--label") < run.indexOf(RUNNER_IMAGE), "the label is an option to run, not an argument to the image");
+  } finally {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("a bidder given no labels starts guests with none", async () => {
+  const root = Deno.makeTempDirSync({ prefix: "microvm-nolabels-" });
+  try {
+    const workDir = `${root}/guests/fc-test-0001`;
+    await Deno.mkdir(workDir, { recursive: true });
+    const written: string[] = [];
+    const microvm = createFirecrackerMicrovm({ backend: backendThatBoots(aSpec(workDir), written), runnerImage: RUNNER_IMAGE });
+    await microvm.boot(aSpec(workDir));
+    assert(!written.find((line) => line.startsWith("run "))!.includes("--label"));
+  } finally {
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("container labels parse from key=value pairs and refuse anything else", () => {
+  assertEquals(parseLabels(""), {});
+  assertEquals(parseLabels("swc.bed=b3d00001"), { "swc.bed": "b3d00001" });
+  assertEquals(parseLabels(" swc.bed=b3d00001 , swc.bidder=bidder-2 "), { "swc.bed": "b3d00001", "swc.bidder": "bidder-2" });
+  let refused = false;
+  try {
+    parseLabels("swc.bed");
+  } catch {
+    refused = true;
+  }
+  assert(refused, "a label with no value is refused rather than silently dropped");
 });

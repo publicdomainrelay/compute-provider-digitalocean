@@ -75,6 +75,7 @@ export interface Microvm {
 export interface FirecrackerMicrovmOptions {
   backend: ContainerBackend;
   runnerImage: string;
+  labels?: Record<string, string>;
   firecrackerPath?: string;
   bootTimeoutMs?: number;
   watchIntervalMs?: number;
@@ -169,6 +170,16 @@ function parseResult(raw: string, container: string, source: string): MicrovmRes
   };
 }
 
+export function parseLabels(spec: string): Record<string, string> {
+  const labels: Record<string, string> = {};
+  for (const pair of spec.split(",").map((p) => p.trim()).filter((p) => p.length > 0)) {
+    const at = pair.indexOf("=");
+    if (at <= 0) throw new Error(`container label ${JSON.stringify(pair)} is not key=value`);
+    labels[pair.slice(0, at)] = pair.slice(at + 1);
+  }
+  return labels;
+}
+
 export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Microvm {
   if (!opts.runnerImage) {
     throw new Error(
@@ -184,6 +195,7 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
   const bootTimeoutMs = opts.bootTimeoutMs ?? DEFAULT_BOOT_TIMEOUT_MS;
   const watchIntervalMs = opts.watchIntervalMs ?? DEFAULT_WATCH_INTERVAL_MS;
   const firecracker = opts.firecrackerPath ?? DEFAULT_FIRECRACKER;
+  const labelArgs = Object.entries(opts.labels ?? {}).flatMap(([key, value]) => ["--label", `${key}=${value}`]);
 
   async function containerState(name: string): Promise<MicrovmContainerState> {
     const inspected = await backend.command(["inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", name])
@@ -248,6 +260,7 @@ export function createFirecrackerMicrovm(opts: FirecrackerMicrovmOptions): Micro
         // sibling providers that boot a VM in a container (compute-provider-local,
         // qemu-standalone) are privileged for the same reason.
         "--privileged",
+        ...labelArgs,
         "-v", `${spec.imageDir}:${spec.imageDir}:ro`,
         "-v", `${spec.workDir}:${spec.workDir}`,
         runnerImage,
