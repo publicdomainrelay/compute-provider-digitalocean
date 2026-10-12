@@ -67,44 +67,21 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
   const plcDirectoryUrl = `http://127.0.0.1:${plcPort}`;
   registerDid(actxDid, pdsUrl);
 
-  // ── 6. sshd — hold listener until sshd confirms ready ─────────────
-  const sshLn = Deno.listen({ hostname: "127.0.0.1", port: 0 });
-  const sshPort = (sshLn.addr as Deno.NetAddr).port;
-  const sshd = new Deno.Command("/usr/sbin/sshd", {
-    args: [
-      "-D", "-p", String(sshPort), "-h", hostKeyPath,
-      "-f", "/dev/null", "-o", "StrictModes no", "-o", "UsePAM no",
-      "-o", "PidFile none", "-o", "MaxStartups 10",
-    ],
-    stdout: "null", stderr: "null",
-  });
-  try { sshLn.close(); } catch {/* ok */}
-  const sshdProc = sshd.spawn();
-
-  let sshdReady = false;
-  for (let i = 0; i < 10; i++) {
-    await new Promise((r) => setTimeout(r, 200));
-    try {
-      const { code } = await new Deno.Command("ssh-keyscan", {
-        args: ["-t", "ed25519", "-p", String(sshPort), "127.0.0.1"],
-        stdout: "null", stderr: "null",
-      }).output();
-      if (code === 0) { sshdReady = true; break; }
-    } catch { /* retry */ }
-  }
-  if (!sshdReady) {
-    plcAc.abort(); pdsAc.abort();
-    try { sshdProc.kill("SIGTERM"); } catch {/* ignore */}
-    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
-    throw new Error("sshd not reachable");
-  }
+  const [hostKeyType, hostPublicKey] = (await Deno.readTextFile(`${hostKeyPath}.pub`)).trim().split(/\s+/);
+  const reportHostKey = async (token: string, signature: string) => {
+    const res = await fetch(`${issuerUrl}/v1/host-keys`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys: [{ type: hostKeyType, publicKey: hostPublicKey }], token, signature }),
+    });
+    assertEquals(res.status, 200, `host-keys report failed: ${await res.text()}`);
+  };
 
   // ── 7. Start compute provider (port 0, bind 127.0.0.1) ────────────
   const dropletById = new Map<string, Record<string, unknown>>();
   const dropletId = crypto.randomUUID().slice(0, 8);
   const dropletRecord = {
     id: dropletId,
-    networks: { v4: [{ ip_address: "127.0.0.1", type: "public" }] },
     tags: [`oidc-sub:plc:${requesterPlc}`, "oidc-sub:role:worker"],
   };
   dropletById.set(dropletId, dropletRecord);
@@ -195,13 +172,14 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     const signResult = await signChild.output();
     const sshSig = new TextDecoder().decode(signResult.stdout).trim();
 
+    await reportHostKey(tokenData, sshSig);
     const proveRes = await fetch(`${issuerUrl}/v1/oidc/prove`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${tokenData}`,
       },
-      body: JSON.stringify({ sig: sshSig, port: sshPort }),
+      body: JSON.stringify({ sig: sshSig }),
     });
     const proveBody = await proveRes.json();
     assertEquals(proveRes.status, 200, `Prove failed: ${JSON.stringify(proveBody)}`);
@@ -246,8 +224,7 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     const noRbacDropletId = crypto.randomUUID().slice(0, 8);
     const noRbacDroplet = {
       id: noRbacDropletId,
-      networks: { v4: [{ ip_address: "127.0.0.1", type: "public" }] },
-      tags: [],
+        tags: [],
     };
     dropletById.set(noRbacDropletId, noRbacDroplet);
     noRbacProvisioning.associateWithDroplet(noRbacDropletId);
@@ -264,13 +241,14 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     const noRbacSignResult = await noRbacSignChild.output();
     const noRbacSig = new TextDecoder().decode(noRbacSignResult.stdout).trim();
 
+    await reportHostKey(noRbacTokenData, noRbacSig);
     const noRbacProveRes = await fetch(`${issuerUrl}/v1/oidc/prove`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${noRbacTokenData}`,
       },
-      body: JSON.stringify({ sig: noRbacSig, port: sshPort }),
+      body: JSON.stringify({ sig: noRbacSig }),
     });
     const noRbacProveBody = await noRbacProveRes.json();
     assertEquals(noRbacProveRes.status, 200, `No-RBAC prove failed: ${JSON.stringify(noRbacProveBody)}`);
@@ -305,8 +283,6 @@ Deno.test("[integration] RBAC-protected /v1/oidc/issue flow", async () => {
     issuerAc.abort();
     plcAc.abort();
     pdsAc.abort();
-    try { sshdProc.kill("SIGTERM"); } catch {/* ignore */}
-    await sshdProc.status;
     await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
   }
 });

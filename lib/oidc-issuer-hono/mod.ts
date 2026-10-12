@@ -1,12 +1,19 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { buildUserData } from "@publicdomainrelay/cloud-init-common";
+import {
+  buildUserData,
+  HOST_KEYS_REPORTER_UNIT,
+  hostKeysReporterModule,
+} from "@publicdomainrelay/cloud-init-common";
 import * as jose from "jose";
 import type { Logger } from "@publicdomainrelay/logger";
 import { noopLogger } from "@publicdomainrelay/logger";
 import {
   type AuthToken,
   type DropletGetter,
+  HostKeyConflictException,
+  type HostKeysReportAck,
+  type HostKeysReported,
   type IssuersForAudience,
   type JwkStore,
   type NonceStore,
@@ -15,6 +22,7 @@ import {
   type OidcIssuerOptions,
   type OidcProvisioningEnricher,
   type ProvisioningData,
+  type ReportedHostKey,
   parseAudience,
   UnauthorizedException,
 } from "@publicdomainrelay/oidc-issuer-abc";
@@ -37,7 +45,8 @@ export type {
   OidcProvisioningEnricher,
   ProvisioningData,
 };
-export { UnauthorizedException };
+export type { HostKeysReportAck, HostKeysReported, ReportedHostKey };
+export { HostKeyConflictException, UnauthorizedException };
 
 export function extractBearer(authHeader: string | undefined): string {
   if (!authHeader) throw new UnauthorizedException("Missing Authorization header");
@@ -80,6 +89,9 @@ export function createMemoryNonceStore(): NonceStore {
 const DEFAULT_TOKEN_TTL_SECONDS = 60 * 60 * 24;
 const DEFAULT_NONCE_LEN = 64;
 const DEFAULT_PROVISIONING_TTL_SECONDS = 60 * 15;
+const DEFAULT_REPORTED_HOST_KEY_WAIT_MS = 300_000;
+
+export const PROVISIONING_TOKEN_PATH = "/root/secrets/publicdomainrelay.com/provisioning/token";
 
 async function signingKeyFromPem(storedPem: string): Promise<CryptoKeyPair> {
   const pemBody = storedPem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
@@ -103,54 +115,6 @@ async function signingKeyFromPem(storedPem: string): Promise<CryptoKeyPair> {
   return { privateKey: priv, publicKey: pub };
 }
 
-async function getPublicKeyFromSshd(
-  publicIpv4: string,
-  port: number,
-  containerName?: string,
-): Promise<string> {
-  const containerCli = (() => {
-    try {
-      Deno.statSync("/usr/local/bin/container");
-      return "/usr/local/bin/container";
-    } catch {
-      return "docker";
-    }
-  })();
-  const deadline = Date.now() + 300_000;
-  while (Date.now() < deadline) {
-    try {
-      let cmd: Deno.Command;
-      if (containerName) {
-        cmd = new Deno.Command(containerCli, {
-          args: ["exec", containerName, "ssh-keyscan", "-t", "ed25519", "-p", String(port), "127.0.0.1"],
-          stdout: "piped",
-          stderr: "piped",
-        });
-      } else {
-        cmd = new Deno.Command("ssh-keyscan", {
-          args: ["-t", "ed25519", "-p", String(port), publicIpv4],
-          stdout: "piped",
-          stderr: "piped",
-        });
-      }
-      const { code, stdout } = await cmd.output();
-      const out = new TextDecoder().decode(stdout).trim();
-
-      if (code === 0) {
-        const line = out.split("\n").find((l) => l.includes("ed25519"));
-        if (line) {
-          const parts = line.split(" ");
-          return parts.slice(1).join(" ");
-        }
-      }
-    } catch {
-      /* retry */
-    }
-    await new Promise((r) => setTimeout(r, 2_000));
-  }
-  throw new Error(`ssh-keyscan timed out for ${publicIpv4}:${port}`);
-}
-
 async function validateSshSignature(
   publicKeyOpensshString: string,
   sshSignatureBlob: string,
@@ -158,7 +122,7 @@ async function validateSshSignature(
 ): Promise<boolean> {
   const tmpDir = await Deno.makeTempDir();
   try {
-    await Deno.writeTextFile(`${tmpDir}/allowed_signing_key.pub`, `* ${publicKeyOpensshString}`);
+    await Deno.writeTextFile(`${tmpDir}/allowed_signers`, `guest ${publicKeyOpensshString}\n`);
     await Deno.writeTextFile(`${tmpDir}/signature`, sshSignatureBlob);
     const dataPath = `${tmpDir}/data`;
     await Deno.writeTextFile(dataPath, dataThatWasSigned);
@@ -167,11 +131,13 @@ async function validateSshSignature(
     const child = new Deno.Command("ssh-keygen", {
       args: [
         "-Y",
-        "check-novalidate",
+        "verify",
+        "-f",
+        "allowed_signers",
+        "-I",
+        "guest",
         "-n",
         "prove-sshd",
-        "-f",
-        "allowed_signing_key.pub",
         "-s",
         "signature",
       ],
@@ -199,6 +165,8 @@ export function createOidcIssuer(opts: OidcIssuerOptions): OidcIssuer {
   const nonceStore = opts.nonceStore ?? createMemoryNonceStore();
   const trustedIssuerUrls = [...(opts.trustedIssuerUrls ?? [])];
   const defaultTtlSeconds = opts.defaultTtlSeconds ?? DEFAULT_TOKEN_TTL_SECONDS;
+  const reportedHostKeyWaitMs = opts.reportedHostKeyWaitMs ?? DEFAULT_REPORTED_HOST_KEY_WAIT_MS;
+  const reportedHostKeys = new Map<string, string>();
   const remoteJwks = new Map<string, ReturnType<typeof jose.createRemoteJWKSet>>();
 
   let signingKey: Promise<CryptoKeyPair> | null = null;
@@ -447,11 +415,10 @@ set -euo pipefail
 set -x
 TEAM_UUID="${teamUuid}"
 THIS_ENDPOINT="${issuerUrl}"
-PROVISIONING_TOKEN="${token.asString}"
-PORT=22
+PROVISIONING_TOKEN="$(cat ${PROVISIONING_TOKEN_PATH})"
 SIG_JSON="$(echo -n "\${PROVISIONING_TOKEN}" \\
     | ssh-keygen -Y sign -n prove-sshd -f /etc/ssh/ssh_host_ed25519_key \\
-    | jq -c --arg port "\${PORT}" --raw-input --slurp '{port: (\$port | fromjson), sig: .}')"
+    | jq -c --raw-input --slurp '{sig: .}')"
 TOKEN="$(curl -sfL \\
     -H "Authorization: Bearer \${PROVISIONING_TOKEN}" \\
     -d "\${SIG_JSON}" \\
@@ -467,8 +434,8 @@ fi
 
     const provisionUnitContent = `[Unit]
 Description=Provisioning Token Exchange
-After=ssh.service network-online.target
-Wants=network-online.target
+After=ssh.service network-online.target ${HOST_KEYS_REPORTER_UNIT}
+Wants=network-online.target ${HOST_KEYS_REPORTER_UNIT}
 ConditionPathExists=!/root/secrets/digitalocean.com/serviceaccount/base_url
 
 [Service]
@@ -541,10 +508,11 @@ WantedBy=multi-user.target
 
     const finalUserData = buildUserData({
       base: userData,
-      modules: [() => ({
+      modules: [hostKeysReporterModule({ url: `${issuerUrl}/v1/host-keys`, tokenPath: PROVISIONING_TOKEN_PATH }), () => ({
         disable_root: false,
         ssh_pwauth: false,
         write_files: [
+          { path: PROVISIONING_TOKEN_PATH, owner: "root:root", permissions: "0600", content: `${token.asString}\n` },
           { path: "/usr/local/bin/send-onnetwork.sh", permissions: "0700", content: onNetworkScriptContent },
           { path: "/etc/systemd/system/guest-onnetwork.service", permissions: "0644", content: onNetworkUnitContent },
           { path: "/usr/local/bin/provisioning-token.sh", permissions: "0700", content: provisionScriptContent },
@@ -573,28 +541,53 @@ WantedBy=multi-user.target
     };
   }
 
+  async function provisioningNonceOf(token: string): Promise<{ oidcToken: OIDCTokenData; nonce: string }> {
+    const oidcToken = await validateToken(token);
+    const nonce = oidcToken.claims["nonce"] as string | undefined;
+    if (!nonce) throw new UnauthorizedException("provisioning token missing nonce claim");
+    return { oidcToken, nonce };
+  }
+
+  async function bindReportedHostKey(token: string, signature: string, ed25519PublicKey: string): Promise<string> {
+    const { nonce } = await provisioningNonceOf(token);
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(ed25519PublicKey)) {
+      throw new UnauthorizedException("reported ed25519 key is not a base64 key blob");
+    }
+    const valid = await validateSshSignature(`ssh-ed25519 ${ed25519PublicKey}`, signature, token);
+    if (!valid) throw new UnauthorizedException("signature over the provisioning token does not verify with the reported key");
+    const bound = reportedHostKeys.get(nonce);
+    if (bound !== undefined && bound !== ed25519PublicKey) {
+      throw new HostKeyConflictException("a different host key was already reported for this provisioning token");
+    }
+    reportedHostKeys.set(nonce, ed25519PublicKey);
+    return nonce;
+  }
+
+  async function reportedHostKeyFor(nonce: string): Promise<string> {
+    const deadline = Date.now() + reportedHostKeyWaitMs;
+    for (;;) {
+      const key = reportedHostKeys.get(nonce);
+      if (key) return key;
+      if (Date.now() >= deadline) {
+        throw new UnauthorizedException("the guest has not reported its host key for this provisioning token");
+      }
+      await new Promise((r) => setTimeout(r, Math.min(1_000, reportedHostKeyWaitMs)));
+    }
+  }
+
   async function provisioningValidate(
     token: string,
     signature: string,
-    port: number,
   ): Promise<{ oidcToken: OIDCTokenData; droplet: Record<string, unknown> } | null> {
-    const oidcToken = await validateToken(token);
-    const nonce = oidcToken.claims["nonce"] as string | undefined;
-    if (!nonce) throw new Error("provisioning token missing nonce claim");
+    const { oidcToken, nonce } = await provisioningNonceOf(token);
+    const publicKey = await reportedHostKeyFor(nonce);
+    const valid = await validateSshSignature(`ssh-ed25519 ${publicKey}`, signature, token);
+    if (!valid) return null;
 
     const dropletId = await nonceStore.getProvisioningNonceDropletId(nonce);
     const droplet = await getDroplet(dropletId);
     if (!droplet) throw new Error(`droplet ${dropletId} not found`);
-
-    const networks = droplet["networks"] as { v4: { ip_address: string; type: string }[] } | undefined;
-    const publicIpv4 = networks?.v4.find((n) => n.type === "public")?.ip_address;
-    if (!publicIpv4) throw new Error(`no public IPv4 for droplet ${dropletId}`);
-
-    const containerName = droplet["containerName"] as string | undefined;
-    const publicKey = await getPublicKeyFromSshd(publicIpv4, port, containerName);
-
-    const valid = await validateSshSignature(publicKey, signature, token);
-    if (!valid) return null;
+    reportedHostKeys.delete(nonce);
     return { oidcToken, droplet };
   }
 
@@ -676,16 +669,54 @@ WantedBy=multi-user.target
     }
   });
 
+  app.post("/v1/host-keys", async (c) => {
+    let body: { keys?: unknown; token?: unknown; signature?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "InvalidRequest" }, 400);
+    }
+    const keys = Array.isArray(body.keys) ? body.keys as ReportedHostKey[] : [];
+    const shaped = keys.length > 0 && keys.every((k) =>
+      k && typeof k === "object" && typeof k.type === "string" && typeof k.publicKey === "string"
+    );
+    if (!shaped || typeof body.token !== "string" || typeof body.signature !== "string") {
+      return c.json({ error: "InvalidRequest", message: "keys, token and signature are required" }, 400);
+    }
+    const ed25519 = keys.find((k) => k.type === "ssh-ed25519");
+    if (!ed25519) return c.json({ error: "InvalidRequest", message: "no ssh-ed25519 key" }, 400);
+    let nonce: string;
+    try {
+      nonce = await bindReportedHostKey(body.token, body.signature, ed25519.publicKey);
+    } catch (err) {
+      const conflict = err instanceof HostKeyConflictException;
+      log("warn", "host keys refused", { error: String(err), conflict });
+      return c.json({ error: conflict ? "Conflict" : "Forbidden", message: String(err) }, conflict ? 409 : 403);
+    }
+    log("info", "host keys reported", { types: keys.map((k) => k.type) });
+    if (!opts.onHostKeys) return c.json({ ok: true });
+    const ack = await opts.onHostKeys({ nonce, keys }).catch((err: unknown) => ({
+      ok: false,
+      status: 500,
+      reason: String(err),
+    }));
+    if (ack.ok) return c.json({ ok: true });
+    return c.json(
+      { error: "Refused", message: ack.reason ?? "refused" },
+      (ack.status ?? 500) as 400 | 403 | 404 | 409 | 500 | 502 | 503,
+    );
+  });
+
   app.post("/v1/oidc/prove", async (c) => {
     try {
-      const body = await c.req.json<{ sig: string; port: number }>();
+      const body = await c.req.json<{ sig: string }>();
       const token = extractBearer(c.req.header("Authorization"));
 
       const provToken = await validateToken(token);
       const actx = provToken.actx;
-      log("info", "prove start", { actx, sub: provToken.sub, port: body.port });
+      log("info", "prove start", { actx, sub: provToken.sub });
 
-      const result = await provisioningValidate(token, body.sig, body.port);
+      const result = await provisioningValidate(token, body.sig);
       if (!result) {
         log("warn", "prove rejected", { actx, reason: "provisioningValidate returned null" });
         return c.json({ valid: false });
@@ -722,5 +753,6 @@ WantedBy=multi-user.target
     raiseIfUnauthorized,
     createProvisioningData,
     provisioningEnricher,
+    bindReportedHostKey,
   };
 }

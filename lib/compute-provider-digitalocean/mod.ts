@@ -6,11 +6,13 @@ import type {
   ComputeProvider,
   ComputeProviderCtx,
   DropletSpec,
+  GuestHostKeysHandler,
   ProvisionResult,
   RbacProvisioner,
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
+import { GuestHostKeysRelay } from "@publicdomainrelay/compute-provider-abc";
 import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
 import type { ServeHandle } from "@publicdomainrelay/serve";
 
@@ -115,8 +117,14 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     return doctxPromise;
   }
 
+  const hostKeys = new GuestHostKeysRelay();
   const oidcIssuer = createOidcIssuer({
     getIssuerUrl,
+    onHostKeys: async (report) => {
+      const ack = await hostKeys.forward(report, new Date().toISOString());
+      logger.info("guest host keys forwarded", { dropletId: ack.id, ok: ack.ok, status: ack.status, reason: ack.reason });
+      return ack;
+    },
     getDroplet: async (id: string) => {
       try {
         const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets/${id}`, {
@@ -328,12 +336,14 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     }
     // Associate nonce with droplet ID (not name) for getDroplet lookup
     enriched.associateWithDroplet(String(providerId));
+    hostKeys.bindNonce(enriched.nonce, providerId);
 
     return { json, rbacRef };
   }
 
   async function deleteDroplet(dropletId: number | string, reason: string): Promise<void> {
     logger.info("deleting droplet", { dropletId, reason });
+    hostKeys.forget(dropletId);
     const res = await fetch(`${digitaloceanBaseUrl}/v2/droplets/${dropletId}`, {
       method: "DELETE",
       headers: { "Authorization": `Bearer ${doToken}` },
@@ -353,6 +363,7 @@ export function createComputeProviderDigitalOcean(ctx: ComputeProviderDigitalOce
     injectAcceptBundle,
     getDroplet: (id: string) => droplets.get(id),
     oidcIssuer,
+    onHostKeys: (handler: GuestHostKeysHandler) => hostKeys.onHostKeys(handler),
   };
 }
 
@@ -365,6 +376,7 @@ export function createDigitalOceanComputeProvider(
     deleteDroplet,
     injectAcceptBundle,
     getDroplet: lookupDroplet,
+    onHostKeys,
   } = createComputeProviderDigitalOcean(ctx);
 
   const rbacByProvider = new Map<string | number, StrongRef>();
@@ -402,5 +414,6 @@ export function createDigitalOceanComputeProvider(
 
     createBidConfig,
     injectAcceptBundle,
+    onHostKeys,
   };
 }

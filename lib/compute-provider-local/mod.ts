@@ -6,11 +6,13 @@ import type {
   ComputeProvider,
   ComputeProviderCtx,
   DropletSpec,
+  GuestHostKeysHandler,
   ProvisionResult,
   RbacProvisioner,
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
+import { GuestHostKeysRelay } from "@publicdomainrelay/compute-provider-abc";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import type { ContainerBackend } from "@publicdomainrelay/container-backend-abc";
 import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
@@ -577,9 +579,15 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
   const log: Logger = (level, message, meta) => {
     logger[level as "info" | "warn" | "error" | "debug"]?.(message, meta);
   };
+  const hostKeys = new GuestHostKeysRelay();
   const oidcIssuer = createOidcIssuer({
     getIssuerUrl,
     getDroplet: (id: string) => droplets.get(id) as Record<string, unknown> | undefined,
+    onHostKeys: async (report) => {
+      const ack = await hostKeys.forward(report, new Date().toISOString());
+      logger.info("guest host keys forwarded", { containerName: ack.id, ok: ack.ok, status: ack.status, reason: ack.reason });
+      return ack;
+    },
     store: ctx.oidcJwkStore,
     nonceStore: ctx.oidcNonceStore,
     log,
@@ -723,6 +731,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     const enriched = ctx.oidcProvisioning
       ? await oidcIssuer.provisioningEnricher.enrich(user_data, agentDidPlc)
       : { userData: user_data, nonce: "", associateWithDroplet: () => {} };
+    hostKeys.bindNonce(enriched.nonce, containerName);
     let enrichedUserData = enriched.userData;
 
     // ── localhost-specific container networking hacks ─────────────────────
@@ -868,6 +877,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
     await backend.kill(name).catch(() => {});
     await backend.rm(name).catch(() => {});
     droplets.delete(name);
+    hostKeys.forget(name);
   }
 
   async function createBidConfig(nowIso: string): Promise<StrongRef> {
@@ -902,6 +912,7 @@ export function createComputeProviderLocal(ctx: ComputeProviderLocalCtx) {
       droplets.get(id) as Record<string, unknown> | undefined,
     ensureImage,
     oidcIssuer,
+    onHostKeys: (handler: GuestHostKeysHandler) => hostKeys.onHostKeys(handler),
   };
 }
 
@@ -915,6 +926,7 @@ export function createLocalComputeProvider(
     injectAcceptBundle: injectBundle,
     getDroplet,
     ensureImage,
+    onHostKeys,
   } = createComputeProviderLocal(ctx);
 
   const rbacByProvider = new Map<string | number, StrongRef>();
@@ -945,6 +957,7 @@ export function createLocalComputeProvider(
     createBidConfig,
     injectAcceptBundle: injectBundle,
     getDroplet,
+    onHostKeys,
     ensureImage,
   } as ComputeProvider & { ensureImage(): Promise<void> };
 }

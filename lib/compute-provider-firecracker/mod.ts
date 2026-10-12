@@ -14,13 +14,21 @@ import type {
   ComputeProviderCtx,
   DropletSpec,
   GuestGone,
+  GuestHostKeysAck,
+  GuestHostKeysHandler,
   ProvisionResult,
   StrongRef,
   VM,
 } from "@publicdomainrelay/compute-provider-abc";
+import { GuestHostKeysRelay } from "@publicdomainrelay/compute-provider-abc";
 import type { NodeImageStore } from "@publicdomainrelay/node-image-abc";
 import type { Microvm, MicrovmExit } from "@publicdomainrelay/microvm-firecracker";
-import { createOidcIssuer, type JwkStore, type NonceStore } from "@publicdomainrelay/oidc-issuer-hono";
+import {
+  createOidcIssuer,
+  type HostKeysReported,
+  type JwkStore,
+  type NonceStore,
+} from "@publicdomainrelay/oidc-issuer-hono";
 import { parseAtUri } from "@publicdomainrelay/atproto-helpers";
 import { DEFAULT_ACCEPT_PATH_VM } from "@publicdomainrelay/secrets-common";
 
@@ -107,10 +115,6 @@ function didWebToHttps(didOrUrl: string): string {
 const PREFIX_BITS = 30;
 
 const DEFAULT_RANGE_BASE = "172.30.0.0";
-
-const GUEST_SSH_PORT = 22;
-
-const GUEST_SSH_BIND = "0.0.0.0";
 
 const GUEST_NAME = /^fc-[0-9a-f]+-[0-9a-f]+$/;
 
@@ -607,15 +611,26 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     if (!guest) return undefined;
     return {
       id,
-      containerName: guest.name,
       tags: [`oidc-sub:plc:${guest.requesterPlc}`, `oidc-sub:role:${guest.role}`],
-      networks: { v4: [{ ip_address: guest.network.guestIp, type: "public" }] },
     };
+  };
+
+  const hostKeys = new GuestHostKeysRelay();
+  const onHostKeys = (handler: GuestHostKeysHandler): () => void => hostKeys.onHostKeys(handler);
+  const dropNonces = (name: string): void => hostKeys.forget(name);
+
+  const forwardHostKeys = async (report: HostKeysReported): Promise<GuestHostKeysAck> => {
+    const ack = await hostKeys.forward(report, new Date().toISOString());
+    if (ack.id === undefined) logger.warn("guest_hostkeys_unknown_guest", {});
+    else if (ack.status === 503) logger.warn("guest_hostkeys_no_listener", { name: ack.id });
+    else logger.info("guest_hostkeys_forwarded", { name: ack.id, ok: ack.ok, status: ack.status, reason: ack.reason });
+    return ack;
   };
 
   const oidcIssuer = createOidcIssuer({
     getIssuerUrl: ctx.getIssuerUrl,
     getDroplet: dropletForIssuer,
+    onHostKeys: forwardHostKeys,
     store: ctx.oidcJwkStore,
     nonceStore: ctx.oidcNonceStore,
     log: (level: string, msg: string, extra?: Record<string, unknown>) => {
@@ -705,6 +720,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     const enriched = ctx.oidcProvisioning
       ? await oidcIssuer.provisioningEnricher.enrich(vm.user_data, atproto.getAgentDid().split(":").slice(-1)[0])
       : { userData: vm.user_data, nonce: "", associateWithDroplet: (_id: string) => {} };
+    hostKeys.bindNonce(enriched.nonce, name);
     const reported = withOnNetworkBaseUrl(
       withOnNetworkReporter(enriched.userData, ctx.getIssuerUrl(), acceptPathVm),
       ctx.getIssuerUrl(),
@@ -734,7 +750,6 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
         vcpu: typeof vm.cpus === "number" && vm.cpus > 0 ? vm.cpus : undefined,
         memMib: parseMemMiB(vm.mem),
         diskMib,
-        pastaArgs: ["-t", `${GUEST_SSH_BIND}/${GUEST_SSH_PORT}:${network.guestIp}`],
         network,
       });
     } catch (cause) {
@@ -827,6 +842,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     const bootNow = await hostBootId();
     const reason = record?.hostBootId && bootNow && record.hostBootId !== bootNow ? "host_reboot" : "vmm_exited";
     guests.delete(name);
+    dropNonces(name);
     await releaseRbac(name);
     await microvm.stop(workDir).catch((err: unknown) =>
       logger.warn("microvm_stop_failed", { name, error: String(err) })
@@ -849,6 +865,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     watches.delete(name);
     const workDir = guests.get(name)?.workDir ?? workDirOf(name);
     guests.delete(name);
+    dropNonces(name);
     if (!workDir) return;
     logger.warn("microvm_exited", {
       name,
@@ -882,6 +899,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     await releaseRbac(name);
     const workDir = workDirOf(name);
     guests.delete(name);
+    dropNonces(name);
     if (!workDir) {
       logger.warn("microvm_destroy_unknown", { name });
       return;
@@ -957,6 +975,7 @@ export function createComputeProviderFirecracker(ctx: ComputeProviderFirecracker
     adopt,
     onConnected,
     onGuestGone,
+    onHostKeys,
     guests,
     dropletForIssuer,
     oidcIssuer,
@@ -997,6 +1016,7 @@ export function createFirecrackerComputeProvider(ctx: ComputeProviderFirecracker
     destroy: inner.destroy,
     adopt: inner.adopt,
     onGuestGone: inner.onGuestGone,
+    onHostKeys: inner.onHostKeys,
     createBidConfig: inner.createBidConfig,
     injectAcceptBundle: (userData: string, bundle: Record<string, unknown>) =>
       injectAcceptBundle(userData, bundle, ctx.acceptPathVm ?? DEFAULT_ACCEPT_PATH_VM),

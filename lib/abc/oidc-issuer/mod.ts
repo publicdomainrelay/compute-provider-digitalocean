@@ -51,6 +51,27 @@ export type DropletGetter = (
 
 export type IssuersForAudience = (api: string, actx: string) => Promise<string[]> | string[];
 
+export interface ReportedHostKey {
+  type: string;
+  publicKey: string;
+  fingerprint?: string;
+}
+
+export interface HostKeysReported {
+  nonce: string;
+  keys: ReportedHostKey[];
+}
+
+export interface HostKeysReportAck {
+  ok: boolean;
+  status?: number;
+  reason?: string;
+}
+
+export class HostKeyConflictException extends Error {
+  constructor(msg: string) { super(msg); this.name = "HostKeyConflictException"; }
+}
+
 export interface OidcIssuerOptions {
   getIssuerUrl: () => string;
   getDroplet?: DropletGetter;
@@ -60,6 +81,8 @@ export interface OidcIssuerOptions {
   nonceStore?: NonceStore;
   trustedIssuerUrls?: string[];
   defaultTtlSeconds?: number;
+  reportedHostKeyWaitMs?: number;
+  onHostKeys?: (report: HostKeysReported) => Promise<HostKeysReportAck>;
 }
 
 export interface AuthToken {
@@ -91,4 +114,5 @@ export interface OidcIssuer {
     opts?: { ttl?: number; nonceLen?: number },
   ): Promise<ProvisioningData>;
   provisioningEnricher: OidcProvisioningEnricher;
+  bindReportedHostKey(token: string, signature: string, ed25519PublicKey: string): Promise<string>;
 }

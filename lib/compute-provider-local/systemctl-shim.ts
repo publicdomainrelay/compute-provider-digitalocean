@@ -531,7 +531,7 @@ async function initMode() {
 
   await generateHostKeys();
 
-  // sshd must be up before cloud-init runcmd (provisioning prove ssh-keyscans us).
+  // sshd must be up before cloud-init runcmd (the host-keys reporter reads its keys).
   await want("ssh.service");
   await reconcile();
 
