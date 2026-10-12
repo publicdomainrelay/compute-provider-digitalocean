@@ -1,0 +1,905 @@
+{
+  "constants": {
+    "WIF_SIMPLE_NSID": "com.publicdomainrelay.temp.compute.config.wif.simple",
+    "ON_NETWORK_NSID": "com.publicdomainrelay.temp.compute.events.vm.onNetwork",
+    "EVENT_NSID": "com.publicdomainrelay.temp.market.event",
+    "SUBMIT_EVENT_NSID": "com.publicdomainrelay.temp.market.submitEvent",
+    "SECRETS_PREFIX": "/root/secrets/digitalocean.com/serviceaccount"
+  },
+  "inputs": {
+    "named": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://did-key-req.relay.localhost\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\nbootcmd:\n  - - sh\n    - -c\n    - grep -qxF '192.168.0.20 relay.localhost' /etc/hosts || echo '192.168.0.20 relay.localhost' >> /etc/hosts\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n",
+    "unnamed": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://did-key-req.relay.localhost\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\nbootcmd:\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n",
+    "public": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://req.example.com\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\nbootcmd:\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n"
+  },
+  "cases": [
+    {
+      "fn": "injectAcceptBundle",
+      "args": [
+        {
+          "$input": "named"
+        },
+        {
+          "accept": {
+            "uri": "at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden",
+            "cid": "bafygolden"
+          },
+          "bid_config": {
+            "uri": "at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1",
+            "cid": "bafybid"
+          },
+          "guest_onnetwork_url": "http://did-key-abc.relay.localhost:42855/v1/on-network"
+        }
+      ],
+      "sha256": "0c8306fcb0978771a6af43955d7b81f316735f34447764db86dbf428eb487048"
+    },
+    {
+      "fn": "injectAcceptBundle",
+      "args": [
+        {
+          "$input": "named"
+        },
+        {
+          "accept": {
+            "uri": "at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden",
+            "cid": "bafygolden"
+          },
+          "bid_config": {
+            "uri": "at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1",
+            "cid": "bafybid"
+          },
+          "guest_onnetwork_url": "http://did-key-abc.relay.localhost:42855/v1/on-network"
+        },
+        "/root/secrets/other/accept.json"
+      ],
+      "sha256": "c1e5c9d808b7425fb40078f9d7ae5ba01ccadb9782e38664775d34af19faf6c8"
+    },
+    {
+      "fn": "onNetworkUrlFromBundle",
+      "args": [
+        {
+          "$ref": 0
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "out": "http://did-key-abc.relay.localhost:42855/v1/on-network"
+    },
+    {
+      "fn": "onNetworkUrlFromBundle",
+      "args": [
+        {
+          "$ref": 0
+        },
+        "https://did-key-prov.relay.localhost/"
+      ],
+      "out": "http://did-key-abc.relay.localhost:42855/v1/on-network"
+    },
+    {
+      "fn": "onNetworkTargets",
+      "args": [
+        {
+          "$ref": 0
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "out": [
+        {
+          "url": "http://did-key-abc.relay.localhost:42855/v1/on-network"
+        },
+        {
+          "url": "http://did-key-abc.relay.localhost:42855/v1/on-network",
+          "resolve": "did-key-abc.relay.localhost:42855:192.168.0.20"
+        }
+      ]
+    },
+    {
+      "fn": "onNetworkReporterModule",
+      "args": [
+        {
+          "$ref": 4
+        }
+      ],
+      "out": {
+        "write_files": [
+          {
+            "path": "/usr/local/bin/send-onnetwork.sh",
+            "owner": "root:root",
+            "permissions": "0700",
+            "content": "#!/usr/bin/env bash\nset -uo pipefail\nACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\nif [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\nFQDN=\"\"\nfor _ in $(seq 1 90); do\n  FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n  [ -n \"${FQDN}\" ] && break\n  sleep 2\ndone\nif [ -z \"${FQDN}\" ]; then\n  echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n  echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n  journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n  exit 0\nfi\nACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\nACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\nif [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\nPAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n  '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\necho \"guest-onnetwork: reporting ${FQDN}\"\nfor _ in 1 2 3 4 5; do\n  CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n    -X POST \"http://did-key-abc.relay.localhost:42855/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n    2>>/tmp/guest-onnetwork.err || echo 000)\"\n  echo \"guest-onnetwork: http ${CODE1} http://did-key-abc.relay.localhost:42855/v1/on-network\"\n  if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n  CODE2=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' --resolve \"did-key-abc.relay.localhost:42855:192.168.0.20\" \\\n    -X POST \"http://did-key-abc.relay.localhost:42855/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n    2>>/tmp/guest-onnetwork.err || echo 000)\"\n  echo \"guest-onnetwork: http ${CODE2} http://did-key-abc.relay.localhost:42855/v1/on-network\"\n  if [ \"${CODE2}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n  sleep 6\ndone\necho \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n"
+          },
+          {
+            "path": "/etc/systemd/system/guest-onnetwork.service",
+            "owner": "root:root",
+            "permissions": "0644",
+            "content": "[Unit]\nDescription=Report the guest iroh ticket to the market\nAfter=network-online.target iroh.service\nWants=network-online.target iroh.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/local/bin/send-onnetwork.sh\nStandardOutput=journal+console\nStandardError=journal+console\n\n[Install]\nWantedBy=multi-user.target\n"
+          }
+        ],
+        "runcmdPrepend": [
+          "systemctl daemon-reload",
+          "systemctl enable --no-block guest-onnetwork.service",
+          "systemctl start --no-block guest-onnetwork.service"
+        ]
+      }
+    },
+    {
+      "fn": "withOnNetworkReporter",
+      "args": [
+        {
+          "$ref": 0
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "3b7f15ec3c3fc14e1ecd9948c9e1b3c2754c1601a29b9156f1c27f975cfc811f"
+    },
+    {
+      "fn": "withOnNetworkReporter",
+      "args": [
+        {
+          "$ref": 6
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "3b7f15ec3c3fc14e1ecd9948c9e1b3c2754c1601a29b9156f1c27f975cfc811f"
+    },
+    {
+      "fn": "withOnNetworkBaseUrl",
+      "args": [
+        {
+          "$ref": 7
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "a1020196e3dcbda4842b4438010b97e155846480d0523dc493e3b7b809a221dd"
+    },
+    {
+      "fn": "withOnNetworkBaseUrl",
+      "args": [
+        {
+          "$ref": 8
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "a1020196e3dcbda4842b4438010b97e155846480d0523dc493e3b7b809a221dd"
+    },
+    {
+      "fn": "addressTheRequesterNamed",
+      "args": [
+        {
+          "$ref": 9
+        }
+      ],
+      "out": "192.168.0.20"
+    },
+    {
+      "fn": "pointGuestAtHost",
+      "args": [
+        {
+          "$ref": 9
+        },
+        {
+          "$ref": 10
+        }
+      ],
+      "out": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://did-key-req.relay.localhost\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\n  - path: /root/secrets/publicdomainrelay.com/market/accept.json\n    owner: root:root\n    permissions: \"0600\"\n    content: |-\n      {\n        \"accept\": {\n          \"uri\": \"at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden\",\n          \"cid\": \"bafygolden\"\n        },\n        \"bid_config\": {\n          \"uri\": \"at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1\",\n          \"cid\": \"bafybid\"\n        },\n        \"guest_onnetwork_url\": \"http://did-key-abc.relay.localhost:42855/v1/on-network\"\n      }\n  - path: /usr/local/bin/send-onnetwork.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -uo pipefail\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      if [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\n      FQDN=\"\"\n      for _ in $(seq 1 90); do\n        FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n        [ -n \"${FQDN}\" ] && break\n        sleep 2\n      done\n      if [ -z \"${FQDN}\" ]; then\n        echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n        echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n        journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n        exit 0\n      fi\n      ACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\n      ACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\n      if [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\n      PAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n        '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\n      echo \"guest-onnetwork: reporting ${FQDN}\"\n      for _ in 1 2 3 4 5; do\n        CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n          -X POST \"http://did-key-abc.relay.localhost:42855/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n          2>>/tmp/guest-onnetwork.err || echo 000)\"\n        echo \"guest-onnetwork: http ${CODE1} http://did-key-abc.relay.localhost:42855/v1/on-network\"\n        if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n        CODE2=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' --resolve \"did-key-abc.relay.localhost:42855:192.168.0.20\" \\\n          -X POST \"http://did-key-abc.relay.localhost:42855/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n          2>>/tmp/guest-onnetwork.err || echo 000)\"\n        echo \"guest-onnetwork: http ${CODE2} http://did-key-abc.relay.localhost:42855/v1/on-network\"\n        if [ \"${CODE2}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n        sleep 6\n      done\n      echo \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n  - path: /etc/systemd/system/guest-onnetwork.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Report the guest iroh ticket to the market\n      After=network-online.target iroh.service\n      Wants=network-online.target iroh.service\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      ExecStart=/usr/local/bin/send-onnetwork.sh\n      StandardOutput=journal+console\n      StandardError=journal+console\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /root/secrets/digitalocean.com/serviceaccount/base_url\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      http://did-key-abc.relay.localhost:42855\nbootcmd:\n  - - sh\n    - -c\n    - grep -qxF '192.168.0.20 relay.localhost' /etc/hosts || echo '192.168.0.20 relay.localhost' >> /etc/hosts\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - - sh\n    - -c\n    - echo 192.168.0.20 did-key-abc.relay.localhost >> /etc/hosts\n  - - sh\n    - -c\n    - echo 192.168.0.20 did-key-req.relay.localhost >> /etc/hosts\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/digitalocean.com/serviceaccount\n  - systemctl daemon-reload\n  - systemctl enable --no-block guest-onnetwork.service\n  - systemctl start --no-block guest-onnetwork.service\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/publicdomainrelay.com/market\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n"
+    },
+    {
+      "fn": "pointGuestAtHost",
+      "args": [
+        {
+          "$ref": 9
+        },
+        {
+          "$ref": 10
+        },
+        8443
+      ],
+      "out": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://did-key-req.relay.localhost:8443\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\n  - path: /root/secrets/publicdomainrelay.com/market/accept.json\n    owner: root:root\n    permissions: \"0600\"\n    content: |-\n      {\n        \"accept\": {\n          \"uri\": \"at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden\",\n          \"cid\": \"bafygolden\"\n        },\n        \"bid_config\": {\n          \"uri\": \"at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1\",\n          \"cid\": \"bafybid\"\n        },\n        \"guest_onnetwork_url\": \"http://did-key-abc.relay.localhost:42855/v1/on-network\"\n      }\n  - path: /usr/local/bin/send-onnetwork.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -uo pipefail\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      if [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\n      FQDN=\"\"\n      for _ in $(seq 1 90); do\n        FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n        [ -n \"${FQDN}\" ] && break\n        sleep 2\n      done\n      if [ -z \"${FQDN}\" ]; then\n        echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n        echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n        journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n        exit 0\n      fi\n      ACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\n      ACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\n      if [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\n      PAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n        '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\n      echo \"guest-onnetwork: reporting ${FQDN}\"\n      for _ in 1 2 3 4 5; do\n        CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n          -X POST \"http://did-key-abc.relay.localhost:42855/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n          2>>/tmp/guest-onnetwork.err || echo 000)\"\n        echo \"guest-onnetwork: http ${CODE1} http://did-key-abc.relay.localhost:42855/v1/on-network\"\n        if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n        CODE2=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' --resolve \"did-key-abc.relay.localhost:42855:192.168.0.20\" \\\n          -X POST \"http://did-key-abc.relay.localhost:42855/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n          2>>/tmp/guest-onnetwork.err || echo 000)\"\n        echo \"guest-onnetwork: http ${CODE2} http://did-key-abc.relay.localhost:42855/v1/on-network\"\n        if [ \"${CODE2}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n        sleep 6\n      done\n      echo \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n  - path: /etc/systemd/system/guest-onnetwork.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Report the guest iroh ticket to the market\n      After=network-online.target iroh.service\n      Wants=network-online.target iroh.service\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      ExecStart=/usr/local/bin/send-onnetwork.sh\n      StandardOutput=journal+console\n      StandardError=journal+console\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /root/secrets/digitalocean.com/serviceaccount/base_url\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      http://did-key-abc.relay.localhost:42855\n  - path: /root/.curlrc\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      resolve = *:8443:192.168.0.20\nbootcmd:\n  - - sh\n    - -c\n    - grep -qxF '192.168.0.20 relay.localhost' /etc/hosts || echo '192.168.0.20 relay.localhost' >> /etc/hosts\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - - sh\n    - -c\n    - echo 192.168.0.20 did-key-abc.relay.localhost >> /etc/hosts\n  - - sh\n    - -c\n    - echo 192.168.0.20 did-key-req.relay.localhost >> /etc/hosts\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/digitalocean.com/serviceaccount\n  - systemctl daemon-reload\n  - systemctl enable --no-block guest-onnetwork.service\n  - systemctl start --no-block guest-onnetwork.service\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/publicdomainrelay.com/market\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n"
+    },
+    {
+      "fn": "injectAcceptBundle",
+      "args": [
+        {
+          "$input": "unnamed"
+        },
+        {
+          "accept": {
+            "uri": "at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden",
+            "cid": "bafygolden"
+          },
+          "bid_config": {
+            "uri": "at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1",
+            "cid": "bafybid"
+          }
+        }
+      ],
+      "sha256": "7a4b4b46c034810bc801123ab2ed8bb5c71e656ce5c7e52f82b33e2943090d10"
+    },
+    {
+      "fn": "injectAcceptBundle",
+      "args": [
+        {
+          "$input": "unnamed"
+        },
+        {
+          "accept": {
+            "uri": "at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden",
+            "cid": "bafygolden"
+          },
+          "bid_config": {
+            "uri": "at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1",
+            "cid": "bafybid"
+          }
+        },
+        "/root/secrets/other/accept.json"
+      ],
+      "sha256": "59f1064f66c1c41709d26495d8720dd9083ed6129a6af5cc45acd1ed3ecb7236"
+    },
+    {
+      "fn": "onNetworkUrlFromBundle",
+      "args": [
+        {
+          "$ref": 13
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "out": "https://did-key-prov.relay.localhost/v1/on-network"
+    },
+    {
+      "fn": "onNetworkUrlFromBundle",
+      "args": [
+        {
+          "$ref": 13
+        },
+        "https://did-key-prov.relay.localhost/"
+      ],
+      "out": "https://did-key-prov.relay.localhost/v1/on-network"
+    },
+    {
+      "fn": "onNetworkTargets",
+      "args": [
+        {
+          "$ref": 13
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "out": [
+        {
+          "url": "https://did-key-prov.relay.localhost/v1/on-network"
+        }
+      ]
+    },
+    {
+      "fn": "onNetworkReporterModule",
+      "args": [
+        {
+          "$ref": 17
+        }
+      ],
+      "out": {
+        "write_files": [
+          {
+            "path": "/usr/local/bin/send-onnetwork.sh",
+            "owner": "root:root",
+            "permissions": "0700",
+            "content": "#!/usr/bin/env bash\nset -uo pipefail\nACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\nif [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\nFQDN=\"\"\nfor _ in $(seq 1 90); do\n  FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n  [ -n \"${FQDN}\" ] && break\n  sleep 2\ndone\nif [ -z \"${FQDN}\" ]; then\n  echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n  echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n  journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n  exit 0\nfi\nACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\nACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\nif [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\nPAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n  '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\necho \"guest-onnetwork: reporting ${FQDN}\"\nfor _ in 1 2 3 4 5; do\n  CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n    -X POST \"https://did-key-prov.relay.localhost/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n    2>>/tmp/guest-onnetwork.err || echo 000)\"\n  echo \"guest-onnetwork: http ${CODE1} https://did-key-prov.relay.localhost/v1/on-network\"\n  if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n  sleep 6\ndone\necho \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n"
+          },
+          {
+            "path": "/etc/systemd/system/guest-onnetwork.service",
+            "owner": "root:root",
+            "permissions": "0644",
+            "content": "[Unit]\nDescription=Report the guest iroh ticket to the market\nAfter=network-online.target iroh.service\nWants=network-online.target iroh.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/local/bin/send-onnetwork.sh\nStandardOutput=journal+console\nStandardError=journal+console\n\n[Install]\nWantedBy=multi-user.target\n"
+          }
+        ],
+        "runcmdPrepend": [
+          "systemctl daemon-reload",
+          "systemctl enable --no-block guest-onnetwork.service",
+          "systemctl start --no-block guest-onnetwork.service"
+        ]
+      }
+    },
+    {
+      "fn": "withOnNetworkReporter",
+      "args": [
+        {
+          "$ref": 13
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "ac736cc209a6d5b113041b8f591dd03b8f30f7ea005d5dd42c80b50114c7fc78"
+    },
+    {
+      "fn": "withOnNetworkReporter",
+      "args": [
+        {
+          "$ref": 19
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "ac736cc209a6d5b113041b8f591dd03b8f30f7ea005d5dd42c80b50114c7fc78"
+    },
+    {
+      "fn": "withOnNetworkBaseUrl",
+      "args": [
+        {
+          "$ref": 20
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "59cbdb7bd0c74ee07ea9d6c9fc822f6eb5996663a3c90b926c0b2758e20d3092"
+    },
+    {
+      "fn": "withOnNetworkBaseUrl",
+      "args": [
+        {
+          "$ref": 21
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "59cbdb7bd0c74ee07ea9d6c9fc822f6eb5996663a3c90b926c0b2758e20d3092"
+    },
+    {
+      "fn": "addressTheRequesterNamed",
+      "args": [
+        {
+          "$ref": 22
+        }
+      ],
+      "out": null
+    },
+    {
+      "fn": "pointGuestAtHost",
+      "args": [
+        {
+          "$ref": 22
+        },
+        "10.0.2.2"
+      ],
+      "out": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://did-key-req.relay.localhost\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\n  - path: /root/secrets/publicdomainrelay.com/market/accept.json\n    owner: root:root\n    permissions: \"0600\"\n    content: |-\n      {\n        \"accept\": {\n          \"uri\": \"at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden\",\n          \"cid\": \"bafygolden\"\n        },\n        \"bid_config\": {\n          \"uri\": \"at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1\",\n          \"cid\": \"bafybid\"\n        }\n      }\n  - path: /usr/local/bin/send-onnetwork.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -uo pipefail\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      if [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\n      FQDN=\"\"\n      for _ in $(seq 1 90); do\n        FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n        [ -n \"${FQDN}\" ] && break\n        sleep 2\n      done\n      if [ -z \"${FQDN}\" ]; then\n        echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n        echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n        journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n        exit 0\n      fi\n      ACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\n      ACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\n      if [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\n      PAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n        '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\n      echo \"guest-onnetwork: reporting ${FQDN}\"\n      for _ in 1 2 3 4 5; do\n        CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n          -X POST \"https://did-key-prov.relay.localhost/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n          2>>/tmp/guest-onnetwork.err || echo 000)\"\n        echo \"guest-onnetwork: http ${CODE1} https://did-key-prov.relay.localhost/v1/on-network\"\n        if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n        sleep 6\n      done\n      echo \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n  - path: /etc/systemd/system/guest-onnetwork.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Report the guest iroh ticket to the market\n      After=network-online.target iroh.service\n      Wants=network-online.target iroh.service\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      ExecStart=/usr/local/bin/send-onnetwork.sh\n      StandardOutput=journal+console\n      StandardError=journal+console\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /root/secrets/digitalocean.com/serviceaccount/base_url\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      https://did-key-prov.relay.localhost\nbootcmd:\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - - sh\n    - -c\n    - echo 10.0.2.2 did-key-prov.relay.localhost >> /etc/hosts\n  - - sh\n    - -c\n    - echo 10.0.2.2 did-key-req.relay.localhost >> /etc/hosts\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/digitalocean.com/serviceaccount\n  - systemctl daemon-reload\n  - systemctl enable --no-block guest-onnetwork.service\n  - systemctl start --no-block guest-onnetwork.service\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/publicdomainrelay.com/market\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n"
+    },
+    {
+      "fn": "pointGuestAtHost",
+      "args": [
+        {
+          "$ref": 22
+        },
+        "10.0.2.2",
+        8443
+      ],
+      "out": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://did-key-req.relay.localhost:8443\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\n  - path: /root/secrets/publicdomainrelay.com/market/accept.json\n    owner: root:root\n    permissions: \"0600\"\n    content: |-\n      {\n        \"accept\": {\n          \"uri\": \"at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden\",\n          \"cid\": \"bafygolden\"\n        },\n        \"bid_config\": {\n          \"uri\": \"at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1\",\n          \"cid\": \"bafybid\"\n        }\n      }\n  - path: /usr/local/bin/send-onnetwork.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -uo pipefail\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      if [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\n      FQDN=\"\"\n      for _ in $(seq 1 90); do\n        FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n        [ -n \"${FQDN}\" ] && break\n        sleep 2\n      done\n      if [ -z \"${FQDN}\" ]; then\n        echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n        echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n        journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n        exit 0\n      fi\n      ACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\n      ACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\n      if [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\n      PAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n        '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\n      echo \"guest-onnetwork: reporting ${FQDN}\"\n      for _ in 1 2 3 4 5; do\n        CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n          -X POST \"https://did-key-prov.relay.localhost:8443/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n          2>>/tmp/guest-onnetwork.err || echo 000)\"\n        echo \"guest-onnetwork: http ${CODE1} https://did-key-prov.relay.localhost:8443/v1/on-network\"\n        if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n        sleep 6\n      done\n      echo \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n  - path: /etc/systemd/system/guest-onnetwork.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Report the guest iroh ticket to the market\n      After=network-online.target iroh.service\n      Wants=network-online.target iroh.service\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      ExecStart=/usr/local/bin/send-onnetwork.sh\n      StandardOutput=journal+console\n      StandardError=journal+console\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /root/secrets/digitalocean.com/serviceaccount/base_url\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      https://did-key-prov.relay.localhost:8443\n  - path: /root/.curlrc\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      resolve = *:8443:10.0.2.2\nbootcmd:\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - - sh\n    - -c\n    - echo 10.0.2.2 did-key-prov.relay.localhost >> /etc/hosts\n  - - sh\n    - -c\n    - echo 10.0.2.2 did-key-req.relay.localhost >> /etc/hosts\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/digitalocean.com/serviceaccount\n  - systemctl daemon-reload\n  - systemctl enable --no-block guest-onnetwork.service\n  - systemctl start --no-block guest-onnetwork.service\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/publicdomainrelay.com/market\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n"
+    },
+    {
+      "fn": "injectAcceptBundle",
+      "args": [
+        {
+          "$input": "public"
+        },
+        {
+          "accept": {
+            "uri": "at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden",
+            "cid": "bafygolden"
+          },
+          "bid_config": {
+            "uri": "at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1",
+            "cid": "bafybid"
+          },
+          "guest_onnetwork_url": "https://bidder.example.com/v1/on-network"
+        }
+      ],
+      "sha256": "e0aba273c833c14d75d5a58b3d3dd86a90ad8a492cfc235a40edc3fdaf90d474"
+    },
+    {
+      "fn": "injectAcceptBundle",
+      "args": [
+        {
+          "$input": "public"
+        },
+        {
+          "accept": {
+            "uri": "at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden",
+            "cid": "bafygolden"
+          },
+          "bid_config": {
+            "uri": "at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1",
+            "cid": "bafybid"
+          },
+          "guest_onnetwork_url": "https://bidder.example.com/v1/on-network"
+        },
+        "/root/secrets/other/accept.json"
+      ],
+      "sha256": "b8538084d13a3a43b7eac25d50c49fc86a42532215eb8514cef4f4b0182c61cc"
+    },
+    {
+      "fn": "onNetworkUrlFromBundle",
+      "args": [
+        {
+          "$ref": 26
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "out": "https://bidder.example.com/v1/on-network"
+    },
+    {
+      "fn": "onNetworkUrlFromBundle",
+      "args": [
+        {
+          "$ref": 26
+        },
+        "https://did-key-prov.relay.localhost/"
+      ],
+      "out": "https://bidder.example.com/v1/on-network"
+    },
+    {
+      "fn": "onNetworkTargets",
+      "args": [
+        {
+          "$ref": 26
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "out": [
+        {
+          "url": "https://bidder.example.com/v1/on-network"
+        }
+      ]
+    },
+    {
+      "fn": "onNetworkReporterModule",
+      "args": [
+        {
+          "$ref": 30
+        }
+      ],
+      "out": {
+        "write_files": [
+          {
+            "path": "/usr/local/bin/send-onnetwork.sh",
+            "owner": "root:root",
+            "permissions": "0700",
+            "content": "#!/usr/bin/env bash\nset -uo pipefail\nACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\nif [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\nFQDN=\"\"\nfor _ in $(seq 1 90); do\n  FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n  [ -n \"${FQDN}\" ] && break\n  sleep 2\ndone\nif [ -z \"${FQDN}\" ]; then\n  echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n  echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n  journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n  exit 0\nfi\nACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\nACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\nif [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\nPAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n  '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\necho \"guest-onnetwork: reporting ${FQDN}\"\nfor _ in 1 2 3 4 5; do\n  CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n    -X POST \"https://bidder.example.com/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n    2>>/tmp/guest-onnetwork.err || echo 000)\"\n  echo \"guest-onnetwork: http ${CODE1} https://bidder.example.com/v1/on-network\"\n  if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n  sleep 6\ndone\necho \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n"
+          },
+          {
+            "path": "/etc/systemd/system/guest-onnetwork.service",
+            "owner": "root:root",
+            "permissions": "0644",
+            "content": "[Unit]\nDescription=Report the guest iroh ticket to the market\nAfter=network-online.target iroh.service\nWants=network-online.target iroh.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/local/bin/send-onnetwork.sh\nStandardOutput=journal+console\nStandardError=journal+console\n\n[Install]\nWantedBy=multi-user.target\n"
+          }
+        ],
+        "runcmdPrepend": [
+          "systemctl daemon-reload",
+          "systemctl enable --no-block guest-onnetwork.service",
+          "systemctl start --no-block guest-onnetwork.service"
+        ]
+      }
+    },
+    {
+      "fn": "withOnNetworkReporter",
+      "args": [
+        {
+          "$ref": 26
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "687d0a738abac9209939f0278648117dbba291bc2993acba7e4cc359f38af516"
+    },
+    {
+      "fn": "withOnNetworkReporter",
+      "args": [
+        {
+          "$ref": 32
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "687d0a738abac9209939f0278648117dbba291bc2993acba7e4cc359f38af516"
+    },
+    {
+      "fn": "withOnNetworkBaseUrl",
+      "args": [
+        {
+          "$ref": 33
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "6eb05b240456228e21cbc42df74077e4854082a250876a43cbf76a871c0aac67"
+    },
+    {
+      "fn": "withOnNetworkBaseUrl",
+      "args": [
+        {
+          "$ref": 34
+        },
+        "https://did-key-prov.relay.localhost"
+      ],
+      "sha256": "6eb05b240456228e21cbc42df74077e4854082a250876a43cbf76a871c0aac67"
+    },
+    {
+      "fn": "addressTheRequesterNamed",
+      "args": [
+        {
+          "$ref": 35
+        }
+      ],
+      "out": null
+    },
+    {
+      "fn": "pointGuestAtHost",
+      "args": [
+        {
+          "$ref": 35
+        },
+        "10.0.2.2"
+      ],
+      "out": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://req.example.com\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\n  - path: /root/secrets/publicdomainrelay.com/market/accept.json\n    owner: root:root\n    permissions: \"0600\"\n    content: |-\n      {\n        \"accept\": {\n          \"uri\": \"at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden\",\n          \"cid\": \"bafygolden\"\n        },\n        \"bid_config\": {\n          \"uri\": \"at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1\",\n          \"cid\": \"bafybid\"\n        },\n        \"guest_onnetwork_url\": \"https://bidder.example.com/v1/on-network\"\n      }\n  - path: /usr/local/bin/send-onnetwork.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -uo pipefail\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      if [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\n      FQDN=\"\"\n      for _ in $(seq 1 90); do\n        FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n        [ -n \"${FQDN}\" ] && break\n        sleep 2\n      done\n      if [ -z \"${FQDN}\" ]; then\n        echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n        echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n        journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n        exit 0\n      fi\n      ACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\n      ACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\n      if [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\n      PAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n        '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\n      echo \"guest-onnetwork: reporting ${FQDN}\"\n      for _ in 1 2 3 4 5; do\n        CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n          -X POST \"https://bidder.example.com/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n          2>>/tmp/guest-onnetwork.err || echo 000)\"\n        echo \"guest-onnetwork: http ${CODE1} https://bidder.example.com/v1/on-network\"\n        if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n        sleep 6\n      done\n      echo \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n  - path: /etc/systemd/system/guest-onnetwork.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Report the guest iroh ticket to the market\n      After=network-online.target iroh.service\n      Wants=network-online.target iroh.service\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      ExecStart=/usr/local/bin/send-onnetwork.sh\n      StandardOutput=journal+console\n      StandardError=journal+console\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /root/secrets/digitalocean.com/serviceaccount/base_url\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      https://bidder.example.com\nbootcmd:\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/digitalocean.com/serviceaccount\n  - systemctl daemon-reload\n  - systemctl enable --no-block guest-onnetwork.service\n  - systemctl start --no-block guest-onnetwork.service\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/publicdomainrelay.com/market\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n"
+    },
+    {
+      "fn": "pointGuestAtHost",
+      "args": [
+        {
+          "$ref": 37
+        },
+        "10.0.2.2",
+        8443
+      ],
+      "out": "#cloud-config\napt:\n  preserve_sources_list: true\nwrite_files:\n  - path: /root/.ssh/authorized_keys\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      ssh-ed25519 AAAAgolden requester\n  - path: /etc/ssh/sshd_config.d/10-iroh.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      # Key-only root login; reached over the guest's own iroh endpoint (the\n      # compute-provider harness also TCP-probes :22 directly for readiness).\n      PermitRootLogin prohibit-password\n      PasswordAuthentication no\n  - path: /usr/local/bin/setup-iroh.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-iroh.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      DUMBPIPE_VERSION=\"0.39.0\"\n\n      if [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n        touch \"${STAMP}\"\n        exit 0\n      fi\n\n      # dumbpipe ships linux tarballs for x86_64 and aarch64 only.\n      case \"$(uname -m)\" in\n        x86_64|amd64) _arch=x86_64 ;;\n        aarch64|arm64) _arch=aarch64 ;;\n        *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\n      esac\n\n      URL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\n      TMP=\"$(mktemp -d)\"\n      trap 'rm -rf \"${TMP}\"' EXIT\n\n      # Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n      # extracted into TMP and the ./dumbpipe it produced is moved into place.\n      for attempt in $(seq 1 5); do\n        if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n            && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n          install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n          touch \"${STAMP}\"\n          exit 0\n        fi\n        echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n        sleep 5\n      done\n\n      echo \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\n      exit 1\n  - path: /usr/local/bin/iroh-listener.sh\n    owner: root:root\n    permissions: \"0755\"\n    content: |\n      #!/bin/bash\n      set -euo pipefail\n\n      # One persistent endpoint secret: regenerating it would change the endpoint id\n      # and therefore the ticket on every restart.\n      SECRET_FILE=/root/.iroh-secret\n      if [ ! -s \"${SECRET_FILE}\" ]; then\n        umask 077\n        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n        chmod 0600 \"${SECRET_FILE}\"\n      fi\n      IROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\n      export IROH_SECRET\n\n      TICKET_FILE=/run/guest-iroh-ticket\n      LOG=/run/guest-iroh.log\n      rm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n      # No --verbose: it appends a second, short-ticket line. The last connect-tcp\n      # line's final field is the full ticket.\n      /usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\n      DUMBPIPE_PID=$!\n\n      TICKET=\"\"\n      for _ in $(seq 1 300); do\n        if [ -s \"${LOG}\" ]; then\n          TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n        fi\n        if [ -n \"${TICKET}\" ]; then\n          break\n        fi\n        if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n          break\n        fi\n        sleep 1\n      done\n\n      if [ -n \"${TICKET}\" ]; then\n        printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n        chmod 0600 \"${TICKET_FILE}\"\n        printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n        mv -f /run/guest-fqdn.tmp /run/guest-fqdn\n      fi\n\n      wait \"${DUMBPIPE_PID}\"\n  - path: /etc/systemd/system/iroh.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=iroh dumbpipe listener in front of local sshd\n      After=network-online.target\n      Wants=network-online.target\n\n      [Service]\n      Type=simple\n      User=root\n      ExecStart=/usr/local/bin/iroh-listener.sh\n      Restart=always\n      RestartSec=5\n      TimeoutStopSec=10\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /usr/local/bin/setup-secrets.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -euo pipefail\n\n      STAMP=/var/lib/setup-secrets.done\n      [ -f \"${STAMP}\" ] && exit 0\n\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      SECRETS_URL=\"https://req.example.com\"\n      SECRETS_ROUTE=\"/v1/secrets\"\n      SECRETS_AUD=\"did:web:did-key-req.relay.localhost\"\n\n      if [ -z \"${SECRETS_URL}\" ] || [ -z \"${SECRETS_AUD}\" ]; then\n        echo \"secrets module misconfigured: missing url or aud\" >&2\n        exit 1\n      fi\n\n      for _ in $(seq 1 60); do\n        [ -f \"${ACCEPT_JSON}\" ] && break\n        sleep 2\n      done\n      [ -f \"${ACCEPT_JSON}\" ] || { echo \"accept.json never appeared at ${ACCEPT_JSON}\" >&2; exit 1; }\n\n      # The bidder writes bid_config as a strongRef wrapper ({uri, cid, value}); older\n      # bidders inlined the record. Accept either.\n      WIF=\"$(jq -c '.bid_config.value // .bid_config // {}' \"${ACCEPT_JSON}\")\"\n      TOKEN_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.token_path // empty')\"\n      URL_PATH=\"$(printf '%s' \"${WIF}\" | jq -r '.url_path // empty')\"\n      URL_ROUTE=\"$(printf '%s' \"${WIF}\" | jq -r '.url_route // \"/v1/oidc/issue\"')\"\n      [ -n \"${TOKEN_PATH}\" ] || { echo \"accept.json has no bid_config token_path\" >&2; exit 1; }\n      [ -n \"${URL_PATH}\" ] || { echo \"accept.json has no bid_config url_path\" >&2; exit 1; }\n\n      for _ in $(seq 1 60); do\n        [ -s \"${TOKEN_PATH}\" ] && [ -s \"${URL_PATH}\" ] && break\n        sleep 2\n      done\n      [ -s \"${TOKEN_PATH}\" ] || { echo \"workload identity token never appeared at ${TOKEN_PATH}\" >&2; exit 1; }\n\n      WID_TOKEN=\"$(cat \"${TOKEN_PATH}\")\"\n      ISSUER_BASE=\"$(cat \"${URL_PATH}\")\"\n\n      # The provider assigned this subject at /v1/oidc/prove from the droplet tags.\n      # Echo it back verbatim so the exchanged token keeps the same identity.\n      PAYLOAD=\"$(printf '%s' \"${WID_TOKEN}\" | cut -d. -f2 | tr '_-' '/+')\"\n      case $(( ${#PAYLOAD} % 4 )) in\n        2) PAYLOAD=\"${PAYLOAD}==\" ;;\n        3) PAYLOAD=\"${PAYLOAD}=\" ;;\n      esac\n      SUBJECT=\"$(printf '%s' \"${PAYLOAD}\" | base64 -d 2>/dev/null | jq -r .sub)\" || SUBJECT=\"\"\n      [ -n \"${SUBJECT}\" ] && [ \"${SUBJECT}\" != \"null\" ] || { echo \"could not read sub from workload identity token\" >&2; exit 1; }\n\n      EXCHANGED=\"\"\n      for attempt in $(seq 1 10); do\n        EXCHANGED=\"$(curl -sf \\\n          -H \"Authorization: Bearer ${WID_TOKEN}\" \\\n          -H \"Content-Type: application/json\" \\\n          -d \"$(jq -nc --arg aud \"${SECRETS_AUD}\" --arg sub \"${SUBJECT}\" '{aud: $aud, sub: $sub, ttl: 300}')\" \\\n          \"${ISSUER_BASE}${URL_ROUTE}\" | jq -r '.token // empty')\" || true\n        [ -n \"${EXCHANGED}\" ] && break\n        echo \"token exchange failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${EXCHANGED}\" ] || { echo \"token exchange failed against ${ISSUER_BASE}${URL_ROUTE}\" >&2; exit 1; }\n\n      BUNDLE=\"\"\n      for attempt in $(seq 1 10); do\n        BUNDLE=\"$(curl -sf -H \"Authorization: Bearer ${EXCHANGED}\" \"${SECRETS_URL}${SECRETS_ROUTE}\")\" || true\n        [ -n \"${BUNDLE}\" ] && break\n        echo \"secrets fetch failed (attempt ${attempt}); retrying\" >&2\n        sleep 5\n      done\n      [ -n \"${BUNDLE}\" ] || { echo \"secrets fetch failed against ${SECRETS_URL}${SECRETS_ROUTE}\" >&2; exit 1; }\n\n      umask 077\n      COUNT=\"$(printf '%s' \"${BUNDLE}\" | jq 'length')\"\n      i=0\n      while [ \"${i}\" -lt \"${COUNT}\" ]; do\n        SECRET_PATH=\"$(printf '%s' \"${BUNDLE}\" | jq -r \".[${i}].path\")\"\n        install -d -m 0700 -o root -g root \"$(dirname \"${SECRET_PATH}\")\"\n        printf '%s' \"${BUNDLE}\" | jq -j \".[${i}].value\" > \"${SECRET_PATH}\"\n        chown root:root \"${SECRET_PATH}\"\n        chmod 0600 \"${SECRET_PATH}\"\n        i=$((i + 1))\n      done\n\n      echo \"wrote ${COUNT} secrets\"\n      touch \"${STAMP}\"\n  - path: /etc/systemd/system/setup-secrets.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Fetch compute contract secrets via workload identity exchange\n      After=network-online.target provisioning-token.service\n      Wants=network-online.target\n      ConditionPathExists=!/var/lib/setup-secrets.done\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      User=root\n      ExecStart=/usr/local/bin/setup-secrets.sh\n      StandardOutput=journal\n      StandardError=journal\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /etc/resolv.conf\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      nameserver 172.30.0.1\n      nameserver 1.1.1.1\n      nameserver 9.9.9.9\n      options timeout:2 attempts:3\n  - path: /root/secrets/publicdomainrelay.com/market/accept.json\n    owner: root:root\n    permissions: \"0600\"\n    content: |-\n      {\n        \"accept\": {\n          \"uri\": \"at://did:plc:requester/com.publicdomainrelay.temp.market.accept/3golden\",\n          \"cid\": \"bafygolden\"\n        },\n        \"bid_config\": {\n          \"uri\": \"at://did:plc:bidder/com.publicdomainrelay.temp.compute.config.wif.simple/1\",\n          \"cid\": \"bafybid\"\n        },\n        \"guest_onnetwork_url\": \"https://bidder.example.com/v1/on-network\"\n      }\n  - path: /usr/local/bin/send-onnetwork.sh\n    owner: root:root\n    permissions: \"0700\"\n    content: |\n      #!/usr/bin/env bash\n      set -uo pipefail\n      ACCEPT_JSON=\"/root/secrets/publicdomainrelay.com/market/accept.json\"\n      if [ ! -f \"${ACCEPT_JSON}\" ]; then echo \"guest-onnetwork: no ${ACCEPT_JSON}\"; exit 0; fi\n      FQDN=\"\"\n      for _ in $(seq 1 90); do\n        FQDN=\"$(cat /run/guest-fqdn 2>/dev/null || true)\"\n        [ -n \"${FQDN}\" ] && break\n        sleep 2\n      done\n      if [ -z \"${FQDN}\" ]; then\n        echo \"guest-onnetwork: no /run/guest-fqdn after 180s\"\n        echo \"guest-onnetwork: iroh is $(systemctl is-active iroh.service 2>&1), restarts=$(systemctl show -p NRestarts --value iroh.service 2>&1)\"\n        journalctl -u iroh.service --no-pager -n 40 2>&1 | tail -40\n        exit 0\n      fi\n      ACCEPT_URI=\"$(jq -r '.accept.uri // empty' \"${ACCEPT_JSON}\")\"\n      ACCEPT_CID=\"$(jq -r '.accept.cid // empty' \"${ACCEPT_JSON}\")\"\n      if [ -z \"${ACCEPT_URI}\" ] || [ -z \"${ACCEPT_CID}\" ]; then echo \"guest-onnetwork: accept.json has no accept ref\"; exit 0; fi\n      PAYLOAD=\"$(jq -nc --arg au \"${ACCEPT_URI}\" --arg ac \"${ACCEPT_CID}\" --arg addr \"${FQDN}\" \\\n        '{acceptUri: $au, acceptCid: $ac, address: $addr}')\"\n      echo \"guest-onnetwork: reporting ${FQDN}\"\n      for _ in 1 2 3 4 5; do\n        CODE1=\"$(curl -sS -m 20 -o /tmp/guest-onnetwork.out -w '%{http_code}' \\\n          -X POST \"https://bidder.example.com/v1/on-network\" -H 'Content-Type: application/json' -d \"${PAYLOAD}\" \\\n          2>>/tmp/guest-onnetwork.err || echo 000)\"\n        echo \"guest-onnetwork: http ${CODE1} https://bidder.example.com/v1/on-network\"\n        if [ \"${CODE1}\" = \"200\" ]; then echo \"guest-onnetwork: reported ${FQDN}\"; exit 0; fi\n        sleep 6\n      done\n      echo \"guest-onnetwork: gave up; last response: $(cat /tmp/guest-onnetwork.out 2>/dev/null)\"\n  - path: /etc/systemd/system/guest-onnetwork.service\n    owner: root:root\n    permissions: \"0644\"\n    content: |\n      [Unit]\n      Description=Report the guest iroh ticket to the market\n      After=network-online.target iroh.service\n      Wants=network-online.target iroh.service\n\n      [Service]\n      Type=oneshot\n      RemainAfterExit=yes\n      ExecStart=/usr/local/bin/send-onnetwork.sh\n      StandardOutput=journal+console\n      StandardError=journal+console\n\n      [Install]\n      WantedBy=multi-user.target\n  - path: /root/secrets/digitalocean.com/serviceaccount/base_url\n    owner: root:root\n    permissions: \"0600\"\n    content: |\n      https://bidder.example.com\nbootcmd:\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\nruncmd:\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/digitalocean.com/serviceaccount\n  - systemctl daemon-reload\n  - systemctl enable --no-block guest-onnetwork.service\n  - systemctl start --no-block guest-onnetwork.service\n  - - sh\n    - -c\n    - install -d -m 0700 -o root -g root /root/secrets/publicdomainrelay.com/market\n  - sh -c 'missing=\"\"; for p in \"openssh-server\" \"jq\" \"curl\"; do dpkg -s \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\"; done; [ -z \"$missing\" ] || { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef $missing; }'\n  - systemctl daemon-reload\n  - systemctl enable setup-secrets.service\n  - systemctl start --no-block setup-secrets.service\n  - /usr/local/bin/setup-iroh.sh\n  - systemctl daemon-reload\n  - systemctl enable iroh.service\n  - systemctl start --no-block iroh.service\n  - systemctl enable --now --no-block ssh || systemctl enable --now --no-block sshd\n  - |-\n    printf '%s' 'nameserver 172.30.0.1\n    nameserver 1.1.1.1\n    nameserver 9.9.9.9\n    options timeout:2 attempts:3\n    ' > /etc/resolv.conf\ndisable_root: false\nssh_pwauth: false\npackage_update: false\n"
+    },
+    {
+      "fn": "pointGuestAtHost",
+      "args": [
+        "#cloud-config\nruncmd:\n  - echo nothing local\n",
+        "10.0.2.2",
+        8443
+      ],
+      "out": "#cloud-config\nruncmd:\n  - echo nothing local\n"
+    },
+    {
+      "fn": "addressTheRequesterNamed",
+      "args": [
+        "#cloud-config\n"
+      ],
+      "out": null
+    },
+    {
+      "fn": "networkFor",
+      "args": [
+        "172.30.0.0",
+        0
+      ],
+      "out": {
+        "guestIp": "172.30.0.2",
+        "gateway": "172.30.0.1",
+        "pastaIp": "172.30.0.0",
+        "prefix": 30,
+        "guestMac": "06:00:ac:1e:00:02"
+      }
+    },
+    {
+      "fn": "networkFor",
+      "args": [
+        "172.30.0.0",
+        1
+      ],
+      "out": {
+        "guestIp": "172.30.0.6",
+        "gateway": "172.30.0.5",
+        "pastaIp": "172.30.0.4",
+        "prefix": 30,
+        "guestMac": "06:00:ac:1e:00:06"
+      }
+    },
+    {
+      "fn": "networkFor",
+      "args": [
+        "172.30.0.0",
+        63
+      ],
+      "out": {
+        "guestIp": "172.30.0.254",
+        "gateway": "172.30.0.253",
+        "pastaIp": "172.30.0.252",
+        "prefix": 30,
+        "guestMac": "06:00:ac:1e:00:fe"
+      }
+    },
+    {
+      "fn": "networkFor",
+      "args": [
+        "172.30.0.0",
+        64
+      ],
+      "out": {
+        "guestIp": "172.30.1.2",
+        "gateway": "172.30.1.1",
+        "pastaIp": "172.30.1.0",
+        "prefix": 30,
+        "guestMac": "06:00:ac:1e:01:02"
+      }
+    },
+    {
+      "fn": "networkFor",
+      "args": [
+        "172.30.0.0",
+        16383
+      ],
+      "out": {
+        "guestIp": "172.30.255.254",
+        "gateway": "172.30.255.253",
+        "pastaIp": "172.30.255.252",
+        "prefix": 30,
+        "guestMac": "06:00:ac:1e:ff:fe"
+      }
+    },
+    {
+      "fn": "networkFor",
+      "args": [
+        "10.200.4.0",
+        70
+      ],
+      "out": {
+        "guestIp": "10.200.5.26",
+        "gateway": "10.200.5.25",
+        "pastaIp": "10.200.5.24",
+        "prefix": 30,
+        "guestMac": "06:00:0a:c8:05:1a"
+      }
+    },
+    {
+      "fn": "guestMacFor",
+      "args": [
+        "172.30.0.2"
+      ],
+      "out": "06:00:ac:1e:00:02"
+    },
+    {
+      "fn": "guestMacFor",
+      "args": [
+        "10.0.2.2"
+      ],
+      "out": "06:00:0a:00:02:02"
+    },
+    {
+      "fn": "guestMacFor",
+      "args": [
+        "255.255.255.255"
+      ],
+      "out": "06:00:ff:ff:ff:ff"
+    },
+    {
+      "fn": "shortId",
+      "args": [
+        "did:plc:requester"
+      ],
+      "out": "68915e31fb9c"
+    },
+    {
+      "fn": "shortId",
+      "args": [
+        "did:plc:ewvi7nxzyoun6zhxrhs64oiz"
+      ],
+      "out": "4c8143960b87"
+    },
+    {
+      "fn": "shortId",
+      "args": [
+        ""
+      ],
+      "out": "1aee8d83488b"
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        "512"
+      ],
+      "out": 512
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        "512M"
+      ],
+      "out": 512
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        "2G"
+      ],
+      "out": 2048
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        "2GiB"
+      ],
+      "out": 2048
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        "1T"
+      ],
+      "out": 1048576
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        "1024K"
+      ],
+      "out": 1
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        " 768 MiB "
+      ],
+      "out": 768
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        "bad"
+      ],
+      "out": null
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        5
+      ],
+      "out": null
+    },
+    {
+      "fn": "parseMemMiB",
+      "args": [
+        null
+      ],
+      "out": null
+    },
+    {
+      "fn": "preinstallManifest",
+      "args": [
+        {
+          "modules": [
+            "iroh",
+            "secrets"
+          ],
+          "ctx": {
+            "vmName": "golden",
+            "sshAuthorizedKey": "ssh-ed25519 AAAAgolden requester",
+            "secretsUrl": "https://did-key-req.relay.localhost",
+            "secretsRoute": "/v1/secrets",
+            "secretsAud": "did:web:did-key-req.relay.localhost"
+          }
+        }
+      ],
+      "out": {
+        "packages": [
+          "openssh-server",
+          "jq",
+          "curl"
+        ],
+        "files": [
+          {
+            "path": "/etc/ssh/sshd_config.d/10-iroh.conf",
+            "mode": "0644",
+            "content": "# Key-only root login; reached over the guest's own iroh endpoint (the\n# compute-provider harness also TCP-probes :22 directly for readiness).\nPermitRootLogin prohibit-password\nPasswordAuthentication no\n"
+          },
+          {
+            "path": "/usr/local/bin/setup-iroh.sh",
+            "mode": "0755",
+            "content": "#!/bin/bash\nset -euo pipefail\n\nSTAMP=/var/lib/setup-iroh.done\n[ -f \"${STAMP}\" ] && exit 0\n\nDUMBPIPE_VERSION=\"0.39.0\"\n\nif [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n  touch \"${STAMP}\"\n  exit 0\nfi\n\n# dumbpipe ships linux tarballs for x86_64 and aarch64 only.\ncase \"$(uname -m)\" in\n  x86_64|amd64) _arch=x86_64 ;;\n  aarch64|arm64) _arch=aarch64 ;;\n  *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\nesac\n\nURL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\nTMP=\"$(mktemp -d)\"\ntrap 'rm -rf \"${TMP}\"' EXIT\n\n# Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n# extracted into TMP and the ./dumbpipe it produced is moved into place.\nfor attempt in $(seq 1 5); do\n  if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n      && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n    install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n    touch \"${STAMP}\"\n    exit 0\n  fi\n  echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n  sleep 5\ndone\n\necho \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\nexit 1\n"
+          },
+          {
+            "path": "/usr/local/bin/iroh-listener.sh",
+            "mode": "0755",
+            "content": "#!/bin/bash\nset -euo pipefail\n\n# One persistent endpoint secret: regenerating it would change the endpoint id\n# and therefore the ticket on every restart.\nSECRET_FILE=/root/.iroh-secret\nif [ ! -s \"${SECRET_FILE}\" ]; then\n  umask 077\n  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n  chmod 0600 \"${SECRET_FILE}\"\nfi\nIROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\nexport IROH_SECRET\n\nTICKET_FILE=/run/guest-iroh-ticket\nLOG=/run/guest-iroh.log\nrm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n# No --verbose: it appends a second, short-ticket line. The last connect-tcp\n# line's final field is the full ticket.\n/usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\nDUMBPIPE_PID=$!\n\nTICKET=\"\"\nfor _ in $(seq 1 300); do\n  if [ -s \"${LOG}\" ]; then\n    TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n  fi\n  if [ -n \"${TICKET}\" ]; then\n    break\n  fi\n  if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n    break\n  fi\n  sleep 1\ndone\n\nif [ -n \"${TICKET}\" ]; then\n  printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n  chmod 0600 \"${TICKET_FILE}\"\n  printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n  mv -f /run/guest-fqdn.tmp /run/guest-fqdn\nfi\n\nwait \"${DUMBPIPE_PID}\"\n"
+          },
+          {
+            "path": "/etc/systemd/system/iroh.service",
+            "mode": "0644",
+            "content": "[Unit]\nDescription=iroh dumbpipe listener in front of local sshd\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=root\nExecStart=/usr/local/bin/iroh-listener.sh\nRestart=always\nRestartSec=5\nTimeoutStopSec=10\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n"
+          },
+          {
+            "path": "/etc/systemd/system/setup-secrets.service",
+            "mode": "0644",
+            "content": "[Unit]\nDescription=Fetch compute contract secrets via workload identity exchange\nAfter=network-online.target provisioning-token.service\nWants=network-online.target\nConditionPathExists=!/var/lib/setup-secrets.done\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nUser=root\nExecStart=/usr/local/bin/setup-secrets.sh\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n"
+          }
+        ],
+        "runs": [
+          "systemctl start --no-block setup-secrets.service",
+          "systemctl enable setup-secrets.service",
+          "systemctl daemon-reload"
+        ],
+        "leftToBoot": {
+          "packages": [],
+          "files": [
+            "/root/.ssh/authorized_keys",
+            "/usr/local/bin/setup-secrets.sh"
+          ],
+          "runs": []
+        }
+      }
+    },
+    {
+      "fn": "preinstallManifest",
+      "args": [
+        {
+          "modules": [
+            "iroh"
+          ],
+          "ctx": {
+            "vmName": "golden",
+            "sshAuthorizedKey": "ssh-ed25519 AAAAgolden requester",
+            "secretsUrl": "https://did-key-req.relay.localhost",
+            "secretsRoute": "/v1/secrets",
+            "secretsAud": "did:web:did-key-req.relay.localhost"
+          },
+          "base": {
+            "packages": [
+              "git"
+            ],
+            "files": [],
+            "runs": [
+              "true"
+            ]
+          }
+        }
+      ],
+      "out": {
+        "packages": [
+          "git",
+          "openssh-server"
+        ],
+        "files": [
+          {
+            "path": "/etc/ssh/sshd_config.d/10-iroh.conf",
+            "mode": "0644",
+            "content": "# Key-only root login; reached over the guest's own iroh endpoint (the\n# compute-provider harness also TCP-probes :22 directly for readiness).\nPermitRootLogin prohibit-password\nPasswordAuthentication no\n"
+          },
+          {
+            "path": "/usr/local/bin/setup-iroh.sh",
+            "mode": "0755",
+            "content": "#!/bin/bash\nset -euo pipefail\n\nSTAMP=/var/lib/setup-iroh.done\n[ -f \"${STAMP}\" ] && exit 0\n\nDUMBPIPE_VERSION=\"0.39.0\"\n\nif [ -x /usr/local/bin/dumbpipe ] && [ \"$(cat /usr/local/bin/dumbpipe.version 2>/dev/null)\" = \"${DUMBPIPE_VERSION}\" ]; then\n  touch \"${STAMP}\"\n  exit 0\nfi\n\n# dumbpipe ships linux tarballs for x86_64 and aarch64 only.\ncase \"$(uname -m)\" in\n  x86_64|amd64) _arch=x86_64 ;;\n  aarch64|arm64) _arch=aarch64 ;;\n  *) echo \"unsupported machine type for dumbpipe: $(uname -m)\" >&2; exit 1 ;;\nesac\n\nURL=\"https://github.com/n0-computer/dumbpipe/releases/download/v${DUMBPIPE_VERSION}/dumbpipe-v${DUMBPIPE_VERSION}-linux-${_arch}.tar.gz\"\n\nTMP=\"$(mktemp -d)\"\ntrap 'rm -rf \"${TMP}\"' EXIT\n\n# Bounded retry: the archive carries only ./dumbpipe, so the whole archive is\n# extracted into TMP and the ./dumbpipe it produced is moved into place.\nfor attempt in $(seq 1 5); do\n  if curl -fsSL \"${URL}\" -o \"${TMP}/dumbpipe.tar.gz\" \\\n      && tar -xzf \"${TMP}/dumbpipe.tar.gz\" -C \"${TMP}\"; then\n    install -m 0755 \"${TMP}/dumbpipe\" /usr/local/bin/dumbpipe\n    touch \"${STAMP}\"\n    exit 0\n  fi\n  echo \"dumbpipe install failed (attempt ${attempt}): ${URL}\" >&2\n  sleep 5\ndone\n\necho \"dumbpipe install failed after 5 attempts: ${URL}\" >&2\nexit 1\n"
+          },
+          {
+            "path": "/usr/local/bin/iroh-listener.sh",
+            "mode": "0755",
+            "content": "#!/bin/bash\nset -euo pipefail\n\n# One persistent endpoint secret: regenerating it would change the endpoint id\n# and therefore the ticket on every restart.\nSECRET_FILE=/root/.iroh-secret\nif [ ! -s \"${SECRET_FILE}\" ]; then\n  umask 077\n  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > \"${SECRET_FILE}\"\n  chmod 0600 \"${SECRET_FILE}\"\nfi\nIROH_SECRET=\"$(cat \"${SECRET_FILE}\")\"\nexport IROH_SECRET\n\nTICKET_FILE=/run/guest-iroh-ticket\nLOG=/run/guest-iroh.log\nrm -f \"${TICKET_FILE}\" \"${LOG}\"\n\n# No --verbose: it appends a second, short-ticket line. The last connect-tcp\n# line's final field is the full ticket.\n/usr/local/bin/dumbpipe listen-tcp --host 127.0.0.1:22 2>>\"${LOG}\" &\nDUMBPIPE_PID=$!\n\nTICKET=\"\"\nfor _ in $(seq 1 300); do\n  if [ -s \"${LOG}\" ]; then\n    TICKET=\"$(grep -a 'connect-tcp' \"${LOG}\" | tail -n 1 | awk '{print $NF}')\"\n  fi\n  if [ -n \"${TICKET}\" ]; then\n    break\n  fi\n  if ! kill -0 \"${DUMBPIPE_PID}\" 2>/dev/null; then\n    break\n  fi\n  sleep 1\ndone\n\nif [ -n \"${TICKET}\" ]; then\n  printf 'iroh://%s\\n' \"${TICKET}\" > \"${TICKET_FILE}\"\n  chmod 0600 \"${TICKET_FILE}\"\n  printf 'iroh://%s\\n' \"${TICKET}\" > /run/guest-fqdn.tmp\n  mv -f /run/guest-fqdn.tmp /run/guest-fqdn\nfi\n\nwait \"${DUMBPIPE_PID}\"\n"
+          },
+          {
+            "path": "/etc/systemd/system/iroh.service",
+            "mode": "0644",
+            "content": "[Unit]\nDescription=iroh dumbpipe listener in front of local sshd\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=root\nExecStart=/usr/local/bin/iroh-listener.sh\nRestart=always\nRestartSec=5\nTimeoutStopSec=10\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n"
+          }
+        ],
+        "runs": [
+          "true"
+        ],
+        "leftToBoot": {
+          "packages": [],
+          "files": [
+            "/root/.ssh/authorized_keys"
+          ],
+          "runs": []
+        }
+      }
+    },
+    {
+      "fn": "shellCommandLine",
+      "args": [
+        [
+          "sh",
+          "-c",
+          "echo 'quoted'"
+        ],
+        "golden"
+      ],
+      "out": "'sh' '-c' 'echo '\\''quoted'\\'''"
+    },
+    {
+      "fn": "shellCommandLine",
+      "args": [
+        "echo plain",
+        "golden"
+      ],
+      "out": "echo plain"
+    }
+  ]
+}
