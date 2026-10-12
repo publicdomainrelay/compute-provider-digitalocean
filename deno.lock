@@ -1390,7 +1390,8 @@
       "jsr:@hono/hono@*",
       "jsr:@std/assert@^1.0.19",
       "npm:@atproto/crypto@0.5",
-      "npm:hono@4"
+      "npm:hono@4",
+      "npm:yaml@^2.7.0"
     ],
     "members": {
       "hono-compute-provider": {
